@@ -25,6 +25,11 @@
 
 - SPI host: SPI2
 - frequency: 8 MHz
+- 1回転内の絶対角を返す
+- multi-turn位置はRAM上でsample間差分をunwrapして保持する
+- encoder軸角を`total gear ratio`で割ってFin出力軸角へ変換する
+
+AS5047Dのmulti-turn周回数はsensor単体からreboot後に復元できないためNVSへ保存しない。
 
 ### ICM42688
 
@@ -145,6 +150,8 @@ Open負方向を「反時計回り」、Close正方向を「時計回り」と�
 | PWM max duty | 1.0 | TODO(HW_TEST) |
 | positive torque polarity | IN1 | TODO(HW_TEST) |
 
+`gear ratio = 176.175`はencoder/motor側角度をFin出力軸角へ変換するために使用する。ZeroHold/RollControlへ渡すFin angle/rateはgear ratio変換後の値とする。
+
 これらをruntime commandやNVSで変更する仕組みは設けない。
 
 実機characterization後にsource constantを更新する。
@@ -170,7 +177,9 @@ Open負方向を「反時計回り」、Close正方向を「時計回り」と�
 factory, app, factory, 0x10000, 4M
 ```
 
-NVSや専用flight-log flash partitionは、必要性が確定するまで追加しない。
+Fin zeroについてはpartitionを追加しても解決しない。AS5047Dの1回転絶対角からreboot前のmulti-turn周回数を復元できないため、Fin zeroとunwrap stateはRAM-onlyとし、reboot後に`FinZero`を再実行する。
+
+NVSや専用flight-log flash partitionは、他用途で必要性が確定するまで追加しない。
 
 ## 8. Launcher angle / display attitude
 

@@ -16,12 +16,17 @@
 ## CommandReceive
 
 - `StartSequence (0x01)`: 無条件で`LiftoffDetection`へ遷移
-- `FinFree (0x10)`: 動翼motorをHi-Zにしてzeroを無効化
-- `FinHoldCurrent (0x13)`: 現在のAS5047D角度を0 degとしてZeroHold開始
+- `FinFree (0x10)`: 動翼motorをHi-Z。Fin zeroとAS5047D multi-turn trackingは保持
+- `FinZero (0x11)`: 現在のmulti-turn AS5047D位置を論理Fin 0 degとしてRAMへcapture。motor modeは変更しない
+- `FinHold (0x13)`: capture済みのFin 0 degをZeroHold。現在位置を再zero化しない
 - `ParaOpen (0x25)`: STS3215を反時計回りに130 deg相対移動し、その位置をHold
 - `ParaClose (0x26)`: STS3215を時計回りに130 deg相対移動し、その位置をHold
 
-同じtransaction ID・同じcommandの再送はcacheされた結果を返し、相対130 degを二重実行しません。
+FinはAS5047Dの1回転角をsampleごとにunwrapしてRAM上のmulti-turn encoder角を維持し、`kTotalGearRatio`でFin出力軸角へ変換します。Free中もAS5047D trackingを止めません。
+
+Fin zeroはNVSへ保存しません。再起動後はencoderの周回数を復元できないため`zero_valid=false`から開始し、CommandReceiveで`FinZero`をやり直します。
+
+同じtransaction ID・同じcommandの再送はcacheされた結果を返し、FinZeroの再captureやPara相対130 degの二重実行を行いません。
 
 ## LiftoffDetection / Flight
 
@@ -49,6 +54,8 @@ RollControl本体は`Flight`内部の出力modeとして実装しています。
 - validな対気速度が60 m/s以下になった場合はそのflightのRollControlを永久停止
 - `airspeed unavailable`は60 m/s以下として扱わない
 - Descent移行時はZeroHoldへ戻る
+
+Fin angle/rateはAS5047D encoder軸のwrapped angle/rateではなく、連続unwrapしたencoder角をtotal gear ratioで変換したFin出力軸値を使用します。
 
 SSCは同じAirData I2C busで取得し、固定zero offset、moving average、LPS静圧、SSC温度からSaint-Venant式でairspeedを計算します。runtime calibration/NVSは使用しません。
 
@@ -92,6 +99,7 @@ ctest --test-dir host_test/build --output-on-failure
 
 - SpicaでRollControl gain / authorityを確定
 - 実機でgyro bias / SSC zeroを確定
+- AS5047Dの連続unwrapが実機最大Fin速度・想定sample gapで周回誤認しないことを確認
 - Fin motor極性・電気定数・ZeroHold gainを実機確認
 - Para ±130 deg、Hold、2 s timeoutを実機確認
 - flight中reset時のPara timer復元

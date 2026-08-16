@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cmath>
 
+#include "actuators/fin_kinematics.hpp"
 #include "config/flight.hpp"
 #include "control/roll_control.hpp"
 #include "mission/flight_detectors.hpp"
@@ -11,6 +12,7 @@
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kDegToRad = kPi / 180.0;
 }
 
 int main() {
@@ -65,17 +67,50 @@ int main() {
   conflict.command = static_cast<uint8_t>(protocol::CommandCode::para_close);
   assert(cache.lookup(conflict).kind == protocol::CommandCache::Lookup::conflict);
 
+  // CommandReceiveのFin command codeを固定する。
+  assert(static_cast<uint8_t>(protocol::CommandCode::fin_free) == 0x10);
+  assert(static_cast<uint8_t>(protocol::CommandCode::fin_zero) == 0x11);
+  assert(static_cast<uint8_t>(protocol::CommandCode::fin_hold) == 0x13);
+
   protocol::CanFrame frame{};
   frame.identifier =
       static_cast<uint16_t>(protocol::CanId::generic_command_request);
   frame.data_length = 8;
   frame.data[0] = 7;
-  frame.data[1] =
-      static_cast<uint8_t>(protocol::CommandCode::fin_hold_current);
+  frame.data[1] = static_cast<uint8_t>(protocol::CommandCode::fin_hold);
   protocol::GenericCommandRequest decoded{};
   assert(protocol::decodeGenericCommand(frame, decoded));
   assert(decoded.transaction_id == 7);
   assert(decoded.command == frame.data[1]);
+
+  // AS5047Dの0/360度境界を跨いでも連続差分を維持する。
+  const double wrap_forward = actuators::fin_kinematics::unwrapEncoderDelta(
+      10.0 * kDegToRad, 350.0 * kDegToRad);
+  const double wrap_reverse = actuators::fin_kinematics::unwrapEncoderDelta(
+      350.0 * kDegToRad, 10.0 * kDegToRad);
+  assert(std::abs(wrap_forward - 20.0 * kDegToRad) < 1.0e-12);
+  assert(std::abs(wrap_reverse + 20.0 * kDegToRad) < 1.0e-12);
+
+  // 1回転角だけを観測しても、隣接sampleの差分からmulti-turnを積算できる。
+  double previous_raw = 350.0 * kDegToRad;
+  double unwrapped = previous_raw;
+  for (int i = 0; i < 6; ++i) {
+    const double next_raw =
+        std::fmod(previous_raw + 120.0 * kDegToRad, 2.0 * kPi);
+    unwrapped += actuators::fin_kinematics::unwrapEncoderDelta(next_raw,
+                                                               previous_raw);
+    previous_raw = next_raw;
+  }
+  const double accumulated = unwrapped - 350.0 * kDegToRad;
+  assert(std::abs(accumulated - 4.0 * kPi) < 1.0e-12);
+
+  // Encoder軸が何周しても、gear ratioで出力軸Fin角へ変換する。
+  const double two_encoder_turns = 4.0 * kPi;
+  const double fin_angle = actuators::fin_kinematics::encoderToFinRadians(
+      two_encoder_turns, flight_config::kTotalGearRatio);
+  assert(std::abs(fin_angle -
+                  two_encoder_turns / flight_config::kTotalGearRatio) <
+         1.0e-15);
 
   // +8秒gateはICMまたはFin zeroが欠ければそのflightで永久停止する。
   control::FlightControlSession gate_ok{
@@ -114,7 +149,8 @@ int main() {
   assert(std::abs(integration.rollDeviationRad()) < 1.0e-12);
   for (uint64_t time = 1'001'000; time <= 1'100'000; time += 1'000)
     assert(integration.observeGyro(time, true, ten_dps));
-  assert(std::abs(integration.rollDeviationRad() - 1.0 * kPi / 180.0) <
+  assert(std::abs(integration.rollDeviationRad() -
+                  1.0 * kPi / 180.0) <
          1.0e-9);
 
   // 短い欠落は復帰可能、上限を超えたgapは永久停止。
@@ -132,8 +168,8 @@ int main() {
   // gain scheduleはstate feedbackを出力し、torque limitを守る。
   control::RollController controller{flight_config::kRollGainSchedule,
                                      flight_config::kRollControlTorqueLimitNm};
-  const auto control_output = controller.compute(
-      {1.0, 0.0, 0.0, 0.0, 100.0});
+  const auto control_output =
+      controller.compute({1.0, 0.0, 0.0, 0.0, 100.0});
   assert(control_output.valid);
   assert(std::abs(control_output.torque_nm + 0.08) < 1.0e-12);
 

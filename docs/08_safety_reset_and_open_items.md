@@ -51,9 +51,13 @@ UART transactionがstallしていてもSafety task側で実行できる構造に
 
 現段階ではflight中resetからのMission復元を保証しない。
 
-NVS partitionを持たず、Fin zeroやflight elapsedを永続化していない。
+NVS partitionを持たず、Fin zero、AS5047D multi-turn周回数、flight elapsedを永続化していない。
 
-したがって、この状態は**本番投入前の未完事項**として扱う。
+AS5047Dは1回転内絶対角のみを返す。gear ratioによりencoder側が複数回転するため、reboot後に何周目だったかを一意に復元できない。このためFin zeroをNVSへ保存して再利用する設計は禁止する。
+
+reboot後は`zero_valid=false`とし、CommandReceiveで物理Finを基準位置へ合わせて`FinZero`を再実行する。
+
+この状態は**本番投入前の未完事項**として扱う。
 
 ### 4.2 復元を追加する場合の原則
 
@@ -69,6 +73,7 @@ NVS partitionを持たず、Fin zeroやflight elapsedを永続化していない
 保存しないもの:
 
 - Fin zero
+- AS5047D multi-turn周回数
 - Control reference
 - roll integration state
 - Para absolute endpoint
@@ -85,7 +90,14 @@ reset後はRollControlへ復帰しない。
 
 ### Fin
 
-- `FinHoldCurrent`で実際の現在位置が論理0度になること
+- `FinZero`でその時点の物理Fin位置が論理0度になること
+- `FinZero`がmotorを駆動せず現在modeを維持すること
+- `FinFree`でmotorがHi-Zになり、zero referenceとAS5047D trackingが維持されること
+- `FinFree`中に動かした後、`FinHold`で元の論理0度へ戻って保持すること
+- AS5047D 0/360度境界を跨いで連続unwrapできること
+- encoder側が複数回転してもFin角が`total gear ratio`で正しく変換されること
+- 想定最大Fin速度・sample gapで隣接valid sampleのencoder回転が180度を超えず、周回誤認しないこと
+- reboot後にzeroが無効化され、古い周回数を再利用しないこと
 - motor正負極性
 - ZeroHold Kp/Kd
 - motor電気定数
@@ -122,9 +134,9 @@ reset後はRollControlへ復帰しない。
 - SDの数秒stallをPSRAMで吸収すること
 - PSRAM full時に未書込old dataを上書きしないこと
 
-## 6. Control実装前に確定する値
+## 6. Control用に確定する値
 
-Control module追加時に以下を固定する。
+以下を飛行前に固定する。
 
 - gyro bias
 - SSC zero
@@ -133,12 +145,13 @@ Control module追加時に以下を固定する。
 - RollControl gain
 - Control output torque/current limit
 - gyro欠落をどこまで補間可能とするか
+- AS5047D multi-turn unwrapが成立する最大sample gap / 実機Fin速度
 
 これらはruntime CalibrationやNVS設定としては実装しない。
 
 ## 7. 60 m/s停止
 
-Control追加後、validなairspeedが60 m/s以下となった時点で、そのflightのRollControlを永久停止する。
+validなairspeedが60 m/s以下となった時点で、そのflightのRollControlを永久停止する。
 
 `airspeed unavailable`を60 m/s以下とみなしてはならない。
 

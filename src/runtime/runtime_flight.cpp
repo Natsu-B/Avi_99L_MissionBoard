@@ -11,22 +11,31 @@
 
 namespace runtime {
 namespace {
+
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegToRad = kPi / 180.0;
+
 protocol::CommandReason reasonForEsp(esp_err_t result) {
-  if (result == ESP_OK) return protocol::CommandReason::none;
-  if (result == ESP_ERR_TIMEOUT) return protocol::CommandReason::timeout;
-  if (result == ESP_ERR_INVALID_STATE) return protocol::CommandReason::busy;
+  if (result == ESP_OK)
+    return protocol::CommandReason::none;
+  if (result == ESP_ERR_TIMEOUT)
+    return protocol::CommandReason::timeout;
+  if (result == ESP_ERR_INVALID_STATE)
+    return protocol::CommandReason::busy;
   return protocol::CommandReason::device_unavailable;
 }
+
 uint64_t elapsed(const mission::Snapshot &snapshot, uint64_t now_us) {
-  if (!snapshot.liftoff_valid || now_us < snapshot.liftoff_us) return 0;
+  if (!snapshot.liftoff_valid || now_us < snapshot.liftoff_us)
+    return 0;
   return now_us - snapshot.liftoff_us;
 }
+
 bool fresh(uint64_t sample_us, uint64_t now_us, uint64_t maximum_age_us) {
   return sample_us != 0 && now_us >= sample_us &&
          now_us - sample_us <= maximum_age_us;
 }
+
 } // namespace
 
 void Runtime::safetyTask() {
@@ -106,7 +115,8 @@ void Runtime::realtimeTask() {
                          std::isfinite(imu_data.angular_velocity_dps[2]);
       if (imu_sample_valid) {
         corrected_roll_rate_dps =
-            -imu_data.angular_velocity_dps[2] - flight_config::kGyroRollBiasDps;
+            -imu_data.angular_velocity_dps[2] -
+            flight_config::kGyroRollBiasDps;
         imu_sample_valid = std::isfinite(corrected_roll_rate_dps);
       }
       imu_valid_.store(imu_sample_valid, std::memory_order_release);
@@ -119,10 +129,12 @@ void Runtime::realtimeTask() {
       imu_valid_.store(false, std::memory_order_release);
     }
 
-    if (snapshot.phase == mission::Phase::liftoff_detection && !imu_sample_valid)
+    if (snapshot.phase == mission::Phase::liftoff_detection &&
+        !imu_sample_valid)
       (void)imu_liftoff_.update(0.0, 0.0, 0.0, false);
 
-    if (snapshot.phase == mission::Phase::liftoff_detection && imu_sample_valid) {
+    if (snapshot.phase == mission::Phase::liftoff_detection &&
+        imu_sample_valid) {
       if (imu_liftoff_.update(imu_data.acceleration_g[0],
                               imu_data.acceleration_g[1],
                               imu_data.acceleration_g[2], true)) {
@@ -143,11 +155,16 @@ void Runtime::realtimeTask() {
     while (xQueueReceive(fin_command_queue_, &fin_command, 0) == pdTRUE) {
       esp_err_t result = ESP_ERR_INVALID_ARG;
       if (fin_command.command ==
-          static_cast<uint8_t>(protocol::CommandCode::fin_hold_current))
-        result = fin_.holdCurrent();
-      else if (fin_command.command ==
-               static_cast<uint8_t>(protocol::CommandCode::fin_free))
+          static_cast<uint8_t>(protocol::CommandCode::fin_zero)) {
+        result = fin_.setZero();
+      } else if (fin_command.command ==
+                 static_cast<uint8_t>(protocol::CommandCode::fin_hold)) {
+        result = fin_.zeroHold();
+      } else if (fin_command.command ==
+                 static_cast<uint8_t>(protocol::CommandCode::fin_free)) {
         result = fin_.free();
+      }
+
       pushResult({fin_command.transaction_id, fin_command.command,
                   result == ESP_OK ? protocol::CommandPhase::completed
                                    : protocol::CommandPhase::failed,
@@ -177,7 +194,8 @@ void Runtime::realtimeTask() {
             airspeed_valid_.load(std::memory_order_acquire) &&
             fresh(airspeed_sample_us_.load(std::memory_order_acquire), now,
                   flight_config::kAirspeedFreshUs);
-        const double airspeed = airspeed_mps_.load(std::memory_order_acquire);
+        const double airspeed =
+            airspeed_mps_.load(std::memory_order_acquire);
         control_session_.observeAirspeed(airspeed_valid, airspeed);
 
         if (control_session_.referenceStarted())
@@ -205,8 +223,8 @@ void Runtime::realtimeTask() {
                   flight_config::kSscFreshUs);
 
         bool control_applied = false;
-        if (!control_session_.permanentlyDisabled() && imu_fresh && fin_fresh &&
-            lps_fresh && ssc_fresh && airspeed_valid &&
+        if (!control_session_.permanentlyDisabled() && imu_fresh &&
+            fin_fresh && lps_fresh && ssc_fresh && airspeed_valid &&
             airspeed > flight_config::kAirspeedPermanentStopMps) {
           if (!control_session_.referenceStarted()) {
             if (control_session_.startReference(now, roll_rate_rad_s))
@@ -249,13 +267,14 @@ void Runtime::realtimeTask() {
             control_session_.referenceStarted() &&
                 control_session_.estimatorValid(),
             std::memory_order_release);
-        control_roll_deviation_rad_.store(control_session_.rollDeviationRad(),
-                                          std::memory_order_release);
+        control_roll_deviation_rad_.store(
+            control_session_.rollDeviationRad(), std::memory_order_release);
       }
     } else {
       control_active_.store(false, std::memory_order_release);
       requested_control_torque_nm_.store(0.0, std::memory_order_release);
-      if (snapshot.phase == mission::Phase::descent && fin_telemetry.zero_valid)
+      if (snapshot.phase == mission::Phase::descent &&
+          fin_telemetry.zero_valid)
         (void)fin_.zeroHold();
     }
 
@@ -283,8 +302,9 @@ void Runtime::realtimeTask() {
           (ssc_valid_.load(std::memory_order_acquire) ? 4U : 0U) |
           (airspeed_valid_.load(std::memory_order_acquire) ? 8U : 0U) |
           (control_active_.load(std::memory_order_acquire) ? 16U : 0U) |
-          (control_permanently_disabled_.load(std::memory_order_acquire) ? 32U
-                                                                         : 0U) |
+          (control_permanently_disabled_.load(std::memory_order_acquire)
+               ? 32U
+               : 0U) |
           (control_reference_valid_.load(std::memory_order_acquire) ? 64U
                                                                     : 0U));
       sample.fin_mode = static_cast<uint8_t>(
@@ -292,13 +312,15 @@ void Runtime::realtimeTask() {
               ? protocol::FinMode::zero_hold
           : fin.state == actuators::FinState::roll_control
               ? protocol::FinMode::roll_control
-          : fin.state == actuators::FinState::free ? protocol::FinMode::free
-                                                   : protocol::FinMode::unknown);
+          : fin.state == actuators::FinState::free
+              ? protocol::FinMode::free
+              : protocol::FinMode::unknown);
       sample.para_mode = static_cast<uint8_t>(para.mode);
       if (imu_sample_valid) {
         for (std::size_t i = 0; i < 3; ++i) {
           sample.acceleration_mg[i] = static_cast<int16_t>(std::clamp<long>(
-              std::lround(imu_data.acceleration_g[i] * 1000.0), -32768, 32767));
+              std::lround(imu_data.acceleration_g[i] * 1000.0), -32768,
+              32767));
           sample.gyro_decidps[i] = static_cast<int16_t>(std::clamp<long>(
               std::lround(imu_data.angular_velocity_dps[i] * 10.0), -32768,
               32767));
@@ -309,7 +331,8 @@ void Runtime::realtimeTask() {
       sample.fin_rate_cdeg_s = static_cast<int16_t>(std::clamp<long>(
           std::lround(fin.rate_deg_s * 100.0), -32768, 32767));
       sample.pressure_pa = static_cast<int32_t>(std::clamp<long long>(
-          std::llround(lps_pressure_hpa_.load(std::memory_order_acquire) * 100.0),
+          std::llround(lps_pressure_hpa_.load(std::memory_order_acquire) *
+                       100.0),
           std::numeric_limits<int32_t>::min(),
           std::numeric_limits<int32_t>::max()));
       sample.para_angle_decideg = static_cast<int16_t>(std::clamp<long>(
@@ -320,6 +343,5 @@ void Runtime::realtimeTask() {
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(1));
   }
 }
-
 
 } // namespace runtime

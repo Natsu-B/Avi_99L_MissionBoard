@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "actuators/fin_kinematics.hpp"
 #include "actuators/safe_outputs.hpp"
 #include "config/board.hpp"
 #include "config/flight.hpp"
@@ -73,43 +74,35 @@ esp_err_t FinActuator::initialize() {
     forceSafe();
     return result;
   }
+
+  encoder_tracking_initialized_ = false;
+  zero_valid_.store(false, std::memory_order_release);
+  rate_valid_.store(false, std::memory_order_release);
   state_.store(FinState::free, std::memory_order_release);
   return coast();
 }
 
-esp_err_t FinActuator::holdCurrent() {
-  if (!encoder_.initialized() || !motor_initialized_)
+esp_err_t FinActuator::setZero() {
+  if (!encoder_.initialized() || !motor_initialized_ ||
+      !encoder_tracking_initialized_ ||
+      !encoder_valid_.load(std::memory_order_acquire))
     return ESP_ERR_INVALID_STATE;
-  AS5047D::Data data{};
-  const esp_err_t result = encoder_.read(data);
-  if (result != ESP_OK || !std::isfinite(data.angle_radians)) {
-    encoder_valid_.store(false, std::memory_order_release);
-    rate_valid_.store(false, std::memory_order_release);
-    zero_valid_.store(false, std::memory_order_release);
-    (void)coast();
-    return result == ESP_OK ? ESP_ERR_INVALID_RESPONSE : result;
-  }
-  zero_rad_ = data.angle_radians;
-  previous_angle_rad_ = 0.0;
-  previous_timestamp_us_ = 0;
-  requested_roll_torque_nm_ = 0.0;
+
+  zero_encoder_unwrapped_rad_ = encoder_unwrapped_rad_;
   angle_rad_.store(0.0, std::memory_order_release);
-  rate_rad_s_.store(0.0, std::memory_order_release);
-  sample_timestamp_us_.store(0, std::memory_order_release);
-  encoder_valid_.store(true, std::memory_order_release);
-  rate_valid_.store(false, std::memory_order_release);
   zero_valid_.store(true, std::memory_order_release);
-  state_.store(FinState::zero_hold, std::memory_order_release);
   return ESP_OK;
 }
 
 esp_err_t FinActuator::zeroHold() {
   if (!motor_initialized_ || !zero_valid_.load(std::memory_order_acquire))
     return ESP_ERR_INVALID_STATE;
+
   state_.store(FinState::zero_hold, std::memory_order_release);
   requested_roll_torque_nm_ = 0.0;
   if (!encoder_valid_.load(std::memory_order_acquire))
     return coast();
+
   const double angle = angle_rad_.load(std::memory_order_acquire);
   const double rate = rate_valid_.load(std::memory_order_acquire)
                           ? rate_rad_s_.load(std::memory_order_acquire)
@@ -122,6 +115,7 @@ esp_err_t FinActuator::setRollControlTorque(double torque_nm) {
       !encoder_valid_.load(std::memory_order_acquire) ||
       !rate_valid_.load(std::memory_order_acquire) || !std::isfinite(torque_nm))
     return ESP_ERR_INVALID_STATE;
+
   requested_roll_torque_nm_ = torque_nm;
   state_.store(FinState::roll_control, std::memory_order_release);
   const double angle = angle_rad_.load(std::memory_order_acquire);
@@ -134,13 +128,8 @@ esp_err_t FinActuator::setRollControlTorque(double torque_nm) {
 
 esp_err_t FinActuator::free() {
   requested_roll_torque_nm_ = 0.0;
-  zero_valid_.store(false, std::memory_order_release);
   state_.store(FinState::free, std::memory_order_release);
   return coast();
-}
-
-double FinActuator::wrapRadians(double value) {
-  return std::remainder(value, kTwoPi);
 }
 
 double FinActuator::zeroHoldTorque(double angle_rad, double rate_rad_s) const {
@@ -164,42 +153,64 @@ void FinActuator::update(uint64_t now_us) {
     return;
   }
 
-  const bool zero_valid = zero_valid_.load(std::memory_order_acquire);
-  const double relative =
-      zero_valid ? wrapRadians(data.angle_radians - zero_rad_) : 0.0;
-  double rate = 0.0;
+  double encoder_delta_rad = 0.0;
   bool rate_valid = false;
-  if (previous_timestamp_us_ != 0 && now_us > previous_timestamp_us_) {
-    const double dt =
-        static_cast<double>(now_us - previous_timestamp_us_) * 1.0e-6;
-    const double delta = wrapRadians(relative - previous_angle_rad_);
-    if (dt > 0.0 && dt <= 0.01) {
-      rate = delta / dt;
-      rate_valid = std::isfinite(rate);
+  if (!encoder_tracking_initialized_) {
+    encoder_tracking_initialized_ = true;
+    previous_encoder_raw_rad_ = data.angle_radians;
+    encoder_unwrapped_rad_ = data.angle_radians;
+  } else {
+    encoder_delta_rad = fin_kinematics::unwrapEncoderDelta(
+        data.angle_radians, previous_encoder_raw_rad_);
+    encoder_unwrapped_rad_ += encoder_delta_rad;
+    previous_encoder_raw_rad_ = data.angle_radians;
+
+    if (previous_timestamp_us_ != 0 && now_us > previous_timestamp_us_) {
+      const double dt =
+          static_cast<double>(now_us - previous_timestamp_us_) * 1.0e-6;
+      if (dt > 0.0 && dt <= 0.01) {
+        const double fin_delta_rad = fin_kinematics::encoderToFinRadians(
+            encoder_delta_rad, flight_config::kTotalGearRatio);
+        const double rate = fin_delta_rad / dt;
+        if (std::isfinite(rate)) {
+          rate_rad_s_.store(rate, std::memory_order_release);
+          rate_valid = true;
+        }
+      }
     }
   }
-  previous_angle_rad_ = relative;
+
   previous_timestamp_us_ = now_us;
   encoder_valid_.store(true, std::memory_order_release);
   rate_valid_.store(rate_valid, std::memory_order_release);
-  angle_rad_.store(relative, std::memory_order_release);
-  rate_rad_s_.store(rate_valid ? rate : 0.0, std::memory_order_release);
+  if (!rate_valid)
+    rate_rad_s_.store(0.0, std::memory_order_release);
   sample_timestamp_us_.store(now_us, std::memory_order_release);
+
+  const bool zero_valid = zero_valid_.load(std::memory_order_acquire);
+  const double angle = zero_valid
+                           ? fin_kinematics::encoderToFinRadians(
+                                 encoder_unwrapped_rad_ -
+                                     zero_encoder_unwrapped_rad_,
+                                 flight_config::kTotalGearRatio)
+                           : 0.0;
+  angle_rad_.store(angle, std::memory_order_release);
 
   if (!zero_valid)
     return;
 
   const FinState state = state_.load(std::memory_order_acquire);
-  const double effective_rate = rate_valid ? rate : 0.0;
+  const double effective_rate =
+      rate_valid ? rate_rad_s_.load(std::memory_order_acquire) : 0.0;
   if (state == FinState::zero_hold) {
-    (void)applyOutputTorque(zeroHoldTorque(relative, effective_rate), relative,
+    (void)applyOutputTorque(zeroHoldTorque(angle, effective_rate), angle,
                             effective_rate);
   } else if (state == FinState::roll_control) {
     if (!rate_valid) {
       (void)coast();
       return;
     }
-    (void)applyOutputTorque(requested_roll_torque_nm_, relative, rate);
+    (void)applyOutputTorque(requested_roll_torque_nm_, angle, effective_rate);
   }
 }
 
@@ -209,7 +220,8 @@ esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
       !std::isfinite(angle_rad) || !std::isfinite(rate_rad_s))
     return ESP_ERR_INVALID_STATE;
 
-  const double command_limit = flight_config::kFinOutwardCommandLimitDeg * kDegToRad;
+  const double command_limit =
+      flight_config::kFinOutwardCommandLimitDeg * kDegToRad;
   if ((angle_rad >= command_limit && torque_nm > 0.0) ||
       (angle_rad <= -command_limit && torque_nm < 0.0))
     torque_nm = 0.0;
@@ -221,15 +233,19 @@ esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
   current = std::clamp(current, -flight_config::kMotorMaxCurrentA,
                        flight_config::kMotorMaxCurrentA);
 
-  const double motor_speed_rad_s = rate_rad_s * flight_config::kTotalGearRatio;
+  const double motor_speed_rad_s =
+      rate_rad_s * flight_config::kTotalGearRatio;
   const double motor_speed_rpm = motor_speed_rad_s * 60.0 / kTwoPi;
   const double back_emf =
       motor_speed_rpm / flight_config::kMotorSpeedConstantRpmPerV;
-  const double voltage = current * flight_config::kMotorResistanceOhm + back_emf;
-  double duty = std::clamp(std::abs(voltage) / flight_config::kMotorBusVoltageV,
-                           0.0, flight_config::kMotorMaximumDuty);
+  const double voltage =
+      current * flight_config::kMotorResistanceOhm + back_emf;
+  double duty =
+      std::clamp(std::abs(voltage) / flight_config::kMotorBusVoltageV, 0.0,
+                 flight_config::kMotorMaximumDuty);
   if (std::abs(torque_nm) < 1.0e-4 && std::abs(rate_rad_s) < 1.0e-3)
     duty = 0.0;
+
   const bool positive_voltage = voltage >= 0.0;
   const bool positive_in1 = flight_config::kPositiveTorqueUsesIn1
                                 ? positive_voltage
@@ -240,11 +256,15 @@ esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
 esp_err_t FinActuator::drive(double duty_signed) {
   if (!motor_initialized_ || !std::isfinite(duty_signed))
     return ESP_ERR_INVALID_STATE;
+
   const double magnitude = std::clamp(std::abs(duty_signed), 0.0, 1.0);
   const uint32_t count = static_cast<uint32_t>(
       std::lround(magnitude * static_cast<double>(kMaximumDutyCount)));
-  const ledc_channel_t active = duty_signed >= 0.0 ? kIn1Channel : kIn2Channel;
-  const ledc_channel_t inactive = duty_signed >= 0.0 ? kIn2Channel : kIn1Channel;
+  const ledc_channel_t active =
+      duty_signed >= 0.0 ? kIn1Channel : kIn2Channel;
+  const ledc_channel_t inactive =
+      duty_signed >= 0.0 ? kIn2Channel : kIn1Channel;
+
   esp_err_t result = ledc_set_duty(kLedcMode, inactive, 0);
   if (result == ESP_OK)
     result = ledc_update_duty(kLedcMode, inactive);
@@ -258,6 +278,7 @@ esp_err_t FinActuator::drive(double duty_signed) {
 esp_err_t FinActuator::coast() {
   if (!motor_initialized_)
     return safe_outputs::motorCoast();
+
   esp_err_t result = ledc_stop(kLedcMode, kIn1Channel, 0);
   const esp_err_t second = ledc_stop(kLedcMode, kIn2Channel, 0);
   if (result == ESP_OK)

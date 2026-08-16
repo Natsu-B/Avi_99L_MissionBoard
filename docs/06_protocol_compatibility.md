@@ -48,15 +48,18 @@
 
 公開command:
 
-| code | command |
-|---:|---|
-| `0x01` | StartSequence |
-| `0x10` | FinFree |
-| `0x13` | FinHoldCurrent |
-| `0x25` | ParaOpen |
-| `0x26` | ParaClose |
+| code | command | semantics |
+|---:|---|---|
+| `0x01` | StartSequence | LiftoffDetectionへ遷移 |
+| `0x10` | FinFree | Fin motor Hi-Z。Fin zeroは保持 |
+| `0x11` | FinZero | 現在のmulti-turn encoder位置を論理Fin 0 degとしてcapture |
+| `0x13` | FinHold | capture済みFin 0 degを保持。Zero再captureなし |
+| `0x25` | ParaOpen | -130 deg relative |
+| `0x26` | ParaClose | +130 deg relative |
 
 argsは現在の最小commandでは全0を要求する。
+
+`0x13`は旧`FinHoldCurrent`の「現在位置を再zero化する」意味では使用しない。wire code自体は維持し、現在の0 deg referenceを保持する`FinHold`へ意味を固定する。
 
 未対応旧commandは、誤って別動作へaliasせず`Rejected / NotSupported`とする。
 
@@ -74,6 +77,8 @@ phase:
 reasonも既存wire値を維持する。
 
 相対Para commandでは再送安全性が重要なため、同じtransaction IDの同一commandは結果cacheを返してside effectを再実行しない。
+
+FinZeroもreplay時に再captureしない。同じtransaction IDのreplayは最初の結果を返す。
 
 ## 6. Wire MissionState
 
@@ -99,7 +104,7 @@ Mission内部では4 phaseだが、wireでは以下のように派生する。
 
 ## 7. Telemetry source unavailable
 
-Mission再実装の初期段階では、Control、airspeed、3D attitudeなど未実装sourceが存在する。
+Mission再実装の初期段階では未実装または一時Unavailableなsourceが存在し得る。
 
 その場合、0やもっともらしい値を偽装せず、既存protocolのerror/unavailable rawを送る。
 
@@ -113,9 +118,7 @@ sourceが実装された時点で同じpacket schemaのままnumeric値へ切り
 - `CREATE-ROCKET/Avi_tenkatenn_board` の地上受信firmware
 - `CREATE-ROCKET/Avi_99L_GroundFirmware`
 
-変更が必要なのは、wire contract自体を変更すると決定した場合だけとする。
-
-Mission内部実装の簡略化、task分割、NVS削除、Control algorithm変更は他repository変更理由にしない。
+ただしGround側のcommand名・UIが旧`FinHoldCurrent` semanticsを仮定している場合は、wire code `0x13`を変えず表示/説明だけを`FinHold`へ更新し、`FinZero (0x11)`を送れる経路を用意する。
 
 ## 9. Vault
 

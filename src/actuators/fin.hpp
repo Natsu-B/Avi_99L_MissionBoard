@@ -24,10 +24,19 @@ struct FinTelemetry {
 class FinActuator {
 public:
   [[nodiscard]] esp_err_t initialize();
-  [[nodiscard]] esp_err_t holdCurrent();
+
+  // 現在の連続AS5047D位置を論理Fin 0度としてRAM上にcaptureする。
+  // motor modeは変更しない。
+  [[nodiscard]] esp_err_t setZero();
+
+  // 既にcapture済みの論理0度を保持する。Zeroを再captureしない。
   [[nodiscard]] esp_err_t zeroHold();
+
   [[nodiscard]] esp_err_t setRollControlTorque(double torque_nm);
+
+  // motorをHi-Zへ落とすが、AS5047DのunwrapとZero referenceは保持する。
   [[nodiscard]] esp_err_t free();
+
   void update(uint64_t now_us);
   void forceSafe();
 
@@ -42,11 +51,11 @@ private:
                                             double rate_rad_s);
   [[nodiscard]] double zeroHoldTorque(double angle_rad,
                                       double rate_rad_s) const;
-  [[nodiscard]] static double wrapRadians(double value);
 
   SPICREATE spi_{};
   AS5047D encoder_{};
   bool motor_initialized_{};
+
   std::atomic<FinState> state_{FinState::unavailable};
   std::atomic<bool> encoder_valid_{};
   std::atomic<bool> rate_valid_{};
@@ -54,9 +63,14 @@ private:
   std::atomic<double> angle_rad_{};
   std::atomic<double> rate_rad_s_{};
   std::atomic<uint64_t> sample_timestamp_us_{};
-  double zero_rad_{};
-  double previous_angle_rad_{};
+
+  // AS5047Dは1回転絶対角しか返さないため、multi-turn位置はRAM上でunwrapする。
+  bool encoder_tracking_initialized_{};
+  double previous_encoder_raw_rad_{};
+  double encoder_unwrapped_rad_{};
+  double zero_encoder_unwrapped_rad_{};
   uint64_t previous_timestamp_us_{};
+
   double requested_roll_torque_nm_{};
 };
 

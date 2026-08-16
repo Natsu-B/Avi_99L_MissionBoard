@@ -7,8 +7,9 @@
 | Command | Code | 動作 |
 |---|---:|---|
 | StartSequence | `0x01` | LiftoffDetectionへ遷移 |
-| FinFree | `0x10` | Fin motorをHi-Z、zero invalid |
-| FinHoldCurrent | `0x13` | 現在のFin位置を0度としてZeroHold |
+| FinFree | `0x10` | Fin motorをHi-Z。AS5047D unwrapとFin zeroは保持 |
+| FinZero | `0x11` | 現在のmulti-turn encoder位置を論理Fin 0度としてRAMへcapture |
+| FinHold | `0x13` | capture済みの論理Fin 0度をZeroHold |
 | ParaOpen | `0x25` | 反時計回り130度の相対move後Hold |
 | ParaClose | `0x26` | 時計回り130度の相対move後Hold |
 
@@ -17,8 +18,8 @@
 特に以下は廃止する。
 
 - ForceStartSequence
-- SetFinZero
 - FinMoveRelative
+- StartFinZeroHold
 - ParaFree
 - ParaHold command
 - ParaMoveRelative
@@ -31,45 +32,74 @@
 
 ## 2. Command replay
 
-相対moveを二重実行しないため、transaction IDとcommandの結果をcacheする。
-
 同じtransaction ID・同じcommandが再送された場合は、既に完了した結果を返し、actuator side effectを再実行しない。
 
 同じtransaction IDを異なるcommandへ使い回すことはprotocol errorとして扱う。
 
 ## 3. Fin
 
-### 3.1 Hardware
+### 3.1 Hardware / coordinate
 
 - encoder: AS5047D
 - motor: 1系統のみ
 - motor driver入力: GPIO39 / GPIO38
 - PWM: 30 kHz
+- total gear ratio: `176.175`
 
-旧2-motor profileやSpareMotorBは使用しない。
+AS5047Dは1回転内の絶対角しか返さない。一方、Finの機構ではgear ratioによりAS5047D側が複数回転するため、単純な`current - zero`のwrap値をFin角として扱ってはならない。
 
-### 3.2 FinHoldCurrent
+CommandReceiveから飛行終了まで、validなAS5047D sampleごとに前sampleとの差を`[-pi,+pi]`へwrapし、その差分をRAM上の`encoder_unwrapped_rad`へ積算する。
 
-CommandReceiveで`FinHoldCurrent`を受理したとき:
+```text
+encoder_delta =
+    remainder(raw_current - raw_previous, 2*pi)
 
-1. AS5047Dの現在角を取得する。
-2. その角度を`zero_rad`としてRAMへ保存する。
-3. 以後の論理Fin角を`current - zero_rad`として扱う。
-4. ZeroHoldを開始する。
-5. `zero_valid=true`とする。
+encoder_unwrapped += encoder_delta
 
-NVSへzeroを保存しない。
+fin_angle =
+    (encoder_unwrapped - zero_encoder_unwrapped)
+    / total_gear_ratio
+```
+
+`remainder`を使用するのは隣接sample間のencoder差分だけであり、Zeroからの累積角そのものを1回転へwrapしてはならない。
+
+隣接valid sample間でAS5047D実回転が180 deg未満であることをunwrapの前提条件とする。productionではAS5047Dを継続取得し、Free中もproducerを止めない。
+
+### 3.2 FinZero
+
+CommandReceiveで`FinZero`を受理したとき:
+
+1. AS5047D trackingが開始済みかつ最新sampleがvalidであることを確認する。
+2. 現在の`encoder_unwrapped_rad`を`zero_encoder_unwrapped_rad`としてRAMへ保存する。
+3. 論理Fin角を0 degとする。
+4. `zero_valid=true`とする。
+5. motor modeは変更しない。
+
+FinZeroは駆動commandではない。Free中ならFreeのまま、ZeroHold中なら新しい0 degをその場で保持する。
 
 ### 3.3 FinFree
 
 `FinFree`受理時:
 
 - motor出力をHi-Zにする。
-- `zero_valid=false`とする。
+- ZeroHold / RollControl torque requestを解除する。
+- `zero_valid`を維持する。
+- AS5047D samplingとmulti-turn unwrapを継続する。
 
-Free中にFinを物理的に動かせるため、以前のzero referenceを保持しない。
+これにより、審査時にFinZero/FinHoldを成立させた後、待機中だけFinFreeとして消費電力を下げ、打上げ前に同じ0 degへFinHoldを戻せる。
 
-### 3.4 ZeroHold
+### 3.4 FinHold
+
+`FinHold`は新しいZeroをcaptureしない。
+
+- `zero_valid=true`
+- motor driver利用可能
+
+を満たす場合のみ、既存の論理Fin 0 degをZeroHoldする。
+
+FinFree中にFinを手で動かした場合も、AS5047D unwrapが連続していれば審査時にcaptureした0 degへ戻る。
+
+### 3.5 ZeroHold
 
 ZeroHoldは論理Fin角0度を保持する。
 
@@ -85,9 +115,19 @@ torque = -Kp * fin_angle - Kd * fin_rate
 - `Kd = 0.296 N m/(rad/s)`
 - torque limit = `0.80 N m`
 
+AS5047Dのencoder軸角・encoder軸角速度は`total gear ratio`で割ってFin出力軸角・角速度へ変換した後でcontrollerへ渡す。
+
 これらは確定飛行値ではなく`TODO(HW_TEST)`とする。
 
-encoderを利用できず現在角が分からない場合はZeroHoldを継続しようとせずmotorをsafe/Hi-Zへ落とす。
+encoderを利用できず現在角が分からない間はmotorをsafe/Hi-Zへ落とす。sample復帰後もmulti-turn unwrapは最後のvalid sampleから継続するため、飛行前試験で想定最大sample gapに対して周回誤認が起きないことを確認する。
+
+### 3.6 RAM-only Zero / reboot
+
+Fin zeroをNVSへ保存しない。
+
+理由はAS5047Dから再起動後に取得できるのが1回転内角度だけであり、gear ratioによりencoder側が複数回転するため、再起動前の`encoder_unwrapped_rad`の周回数を復元できないためである。
+
+reboot後は`zero_valid=false`から開始し、CommandReceiveで物理Finを基準位置へ合わせて`FinZero`を再実行する。
 
 ## 4. Parachute / STS3215
 

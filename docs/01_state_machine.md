@@ -28,9 +28,16 @@ boot後の初期phase。
 
 - `StartSequence (0x01)`
 - `FinFree (0x10)`
-- `FinHoldCurrent (0x13)`
+- `FinZero (0x11)`
+- `FinHold (0x13)`
 - `ParaOpen (0x25)`
 - `ParaClose (0x26)`
+
+Fin操作の意味は以下とする。
+
+- `FinFree`: motorをHi-Zにする。Fin zeroとAS5047D multi-turn trackingは維持する。
+- `FinZero`: 現在の連続AS5047D位置を論理Fin 0度としてRAMへcaptureする。motor modeは変更しない。
+- `FinHold`: capture済みの論理Fin 0度を保持する。現在位置を新しい0度にはしない。
 
 `StartSequence`はPreflight readinessやCalibration resultを確認せず、phaseがCommandReceiveであればLiftoffDetectionへ遷移する。
 
@@ -49,6 +56,8 @@ StartSequence受理後の離床待機phase。
 
 を継続する。
 
+AS5047D trackingはCommandReceiveから停止せず、Freeであっても1回転角のunwrapを継続する。
+
 離床検知が成立した時点で、検知時刻の1秒前を`liftoff_us`とする。
 
 ```text
@@ -65,7 +74,7 @@ liftoff_us = max(detected_us - 1 s, 0)
 
 Flight中の主な時間条件:
 
-- +8 s: Control資格判定（Control実装段階で使用）
+- +8 s: Control資格判定
 - +10 s: pressure apex判定を有効化
 - +17 s: 無条件timer fallback deployment
 - +25 s: absolute actuator power cutoff
@@ -87,12 +96,13 @@ CAN ID `0x002` を使用する。
 - generationを更新
 - liftoff時刻を無効化
 - deployment関連stateをclear
-- Control開始判定、roll reference、control permanent stop latchをclearする（Control追加後）
+- Control開始判定、roll reference、control permanent stop latchをclearする
 - 離床検知counterとapex detectorをreset
 
 維持するもの:
 
 - CommandReceiveで設定したFin zero
+- AS5047D multi-turn tracking
 - Paraの現在Hold状態
 - compile-time parameter
 - device driver初期化

@@ -47,11 +47,14 @@
 
 ### Fin actuator
 
-- AS5047Dの読取り
-- CommandReceiveでの現在位置0度定義
-- Free / ZeroHold
-- 次段のRollControl出力
+- AS5047Dの継続読取り
+- 1回転角のsample間差分を用いたRAM上multi-turn unwrap
+- total gear ratioによるencoder軸角からFin出力軸角への変換
+- CommandReceiveでの`FinZero`による現在位置0度定義
+- `FinFree` / `FinHold` / RollControl出力
 - encoderが利用不能な場合のmotor safe化
+
+Fin zeroとAS5047Dのmulti-turn周回数は永続化しない。`FinFree`はmotorだけをHi-Zにし、同一boot中のzero referenceとunwrap trackingを維持する。
 
 ### Parachute actuator
 
@@ -90,7 +93,7 @@ Mission側ではdevice APIを薄く包み、旧MissionBoardの高位runtime型�
 - ICM42688
 - AS5047D
 - LPS25HB
-- SSCDRRN005PD2A5（Control追加時）
+- SSCDRRN005PD2A5
 - STS3215 / STSCREATE
 - CANCREATE
 
@@ -101,12 +104,15 @@ Mission側ではdevice APIを薄く包み、旧MissionBoardの高位runtime型�
 以下は永続保存しない。
 
 - Fin zero
+- AS5047D multi-turn unwrap周回数
 - Para Open/Close位置
 - gyro bias calibration結果
 - SSC zero calibration結果
 - Preflight readiness
 
-Fin zeroは毎boot後にCommandReceiveで`FinHoldCurrent`を行った位置を0度とする。
+AS5047Dからreboot後に取得できるのは1回転内の絶対角だけであり、gear ratioによって生じるencoder側の周回数は復元できない。このためFin zeroをNVSへ保存しても同じ物理0度を再構成できない。
+
+Fin zeroは毎boot後にCommandReceiveで物理Finを基準位置へ合わせ、`FinZero (0x11)`で現在の連続encoder位置を0度としてcaptureする。reboot時は必ず`zero_valid=false`へ戻す。
 
 Paraは絶対endpointを保存せず、Open/Closeを固定相対130度として実行する。
 
@@ -118,4 +124,4 @@ Paraは絶対endpointを保存せず、Open/Closeを固定相対130度として�
 
 Mission Board側が既存CAN ID、packet layout、command/result semanticsを維持することで互換を取る。
 
-Mission内部stateの簡略化を理由に、他基板へ同じstate machine変更を波及させない。
+Fin commandは`0x10=FinFree`, `0x11=FinZero`, `0x13=FinHold`とする。`0x13`のwire codeは維持するが、現在位置を再zero化する旧`FinHoldCurrent` semanticsは廃止する。

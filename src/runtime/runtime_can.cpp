@@ -11,16 +11,21 @@
 
 namespace runtime {
 namespace {
+
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRadToDeg = 180.0 / kPi;
+
 bool allZero(const std::array<uint8_t, 6> &args) {
   return std::all_of(args.begin(), args.end(),
                      [](uint8_t value) { return value == 0; });
 }
+
 uint64_t elapsed(const mission::Snapshot &snapshot, uint64_t now_us) {
-  if (!snapshot.liftoff_valid || now_us < snapshot.liftoff_us) return 0;
+  if (!snapshot.liftoff_valid || now_us < snapshot.liftoff_us)
+    return 0;
   return now_us - snapshot.liftoff_us;
 }
+
 } // namespace
 
 void Runtime::canTask() {
@@ -31,18 +36,21 @@ void Runtime::canTask() {
   uint8_t lps_sequence = 0;
   uint8_t airspeed_sequence = 0;
   uint8_t last_reference_event_sequence = 0;
+
   uint64_t next_status = 0;
   uint64_t next_kinematics = 0;
   uint64_t next_control = 0;
   uint64_t next_control_roll = 0;
   uint64_t next_lps = 0;
   uint64_t next_airspeed = 0;
+
   TickType_t wake = xTaskGetTickCount();
   uint64_t next_can_retry = 0;
   uint64_t next_can_status = 0;
 
   for (;;) {
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+
     if (!can_.initialized() && now >= next_can_retry) {
       (void)initializeCan();
       next_can_retry = now + 1'000'000ULL;
@@ -54,6 +62,7 @@ void Runtime::canTask() {
         (void)can_.recover(avi::Timeout::milliseconds(10));
       next_can_status = now + 100'000ULL;
     }
+
     CANCREATE::Frame raw{};
     while (can_.read(raw, avi::Timeout::noWait()) == ESP_OK) {
       protocol::CanFrame frame{};
@@ -72,6 +81,7 @@ void Runtime::canTask() {
                protocol::CommandReason::invalid_argument, 0}));
           continue;
         }
+
         const auto lookup = command_cache_.lookup(request);
         if (lookup.kind != protocol::CommandCache::Lookup::miss) {
           sendCanFrame(protocol::encode(lookup.result));
@@ -80,15 +90,18 @@ void Runtime::canTask() {
 
         const auto code = static_cast<protocol::CommandCode>(request.command);
         const auto phase = state_.snapshot().phase;
+
         if (code == protocol::CommandCode::start_sequence) {
           command_cache_.rememberAccepted(request);
           sendCanFrame(protocol::encode(
               {request.transaction_id, request.command,
                protocol::CommandPhase::accepted, protocol::CommandReason::none,
                0}));
+
           const bool ok = state_.startSequence();
           const protocol::CommandResult final{
-              request.transaction_id, request.command,
+              request.transaction_id,
+              request.command,
               ok ? protocol::CommandPhase::completed
                  : protocol::CommandPhase::failed,
               ok ? protocol::CommandReason::none
@@ -99,11 +112,15 @@ void Runtime::canTask() {
           continue;
         }
 
-        const bool is_fin = code == protocol::CommandCode::fin_free ||
-                            code == protocol::CommandCode::fin_hold_current;
+        const bool is_fin =
+            code == protocol::CommandCode::fin_free ||
+            code == protocol::CommandCode::fin_zero ||
+            code == protocol::CommandCode::fin_hold;
         const bool is_para = code == protocol::CommandCode::para_open ||
                              code == protocol::CommandCode::para_close;
-        if ((is_fin || is_para) && phase != mission::Phase::command_receive) {
+
+        if ((is_fin || is_para) &&
+            phase != mission::Phase::command_receive) {
           const protocol::CommandResult rejected{
               request.transaction_id, request.command,
               protocol::CommandPhase::rejected,
@@ -126,15 +143,18 @@ void Runtime::canTask() {
             sendCanFrame(protocol::encode(rejected));
             continue;
           }
-          const ActuatorCommand command{request.transaction_id, request.command};
+
+          const ActuatorCommand command{request.transaction_id,
+                                        request.command};
           if (xQueueSend(fin_command_queue_, &command, 0) != pdTRUE) {
-            fin_command_pending_.store(false);
+            fin_command_pending_.store(false, std::memory_order_release);
             sendCanFrame(protocol::encode(
                 {request.transaction_id, request.command,
                  protocol::CommandPhase::rejected,
                  protocol::CommandReason::busy, 0}));
             continue;
           }
+
           command_cache_.rememberAccepted(request);
           sendCanFrame(protocol::encode(
               {request.transaction_id, request.command,
@@ -155,15 +175,18 @@ void Runtime::canTask() {
             sendCanFrame(protocol::encode(rejected));
             continue;
           }
-          const ActuatorCommand command{request.transaction_id, request.command};
+
+          const ActuatorCommand command{request.transaction_id,
+                                        request.command};
           if (xQueueSend(para_command_queue_, &command, 0) != pdTRUE) {
-            para_command_pending_.store(false);
+            para_command_pending_.store(false, std::memory_order_release);
             sendCanFrame(protocol::encode(
                 {request.transaction_id, request.command,
                  protocol::CommandPhase::rejected,
                  protocol::CommandReason::busy, 0}));
             continue;
           }
+
           command_cache_.rememberAccepted(request);
           sendCanFrame(protocol::encode(
               {request.transaction_id, request.command,
@@ -188,18 +211,22 @@ void Runtime::canTask() {
         replay_key.transaction_id = emergency_transaction;
         replay_key.command = static_cast<uint8_t>(
             protocol::CommandCode::liftoff_emergency_result);
+
         const auto lookup = command_cache_.lookup(replay_key);
         if (lookup.kind != protocol::CommandCache::Lookup::miss) {
           sendCanFrame(protocol::encode(lookup.result));
           continue;
         }
+
         if (emergency_transaction != 0)
           command_cache_.rememberAccepted(replay_key);
+
         const bool accepted = emergency_transaction != 0 &&
                               state_.liftoffEmergencyRollback();
         const protocol::CommandResult result{
             emergency_transaction,
-            static_cast<uint8_t>(protocol::CommandCode::liftoff_emergency_result),
+            static_cast<uint8_t>(
+                protocol::CommandCode::liftoff_emergency_result),
             accepted ? protocol::CommandPhase::completed
                      : protocol::CommandPhase::rejected,
             accepted ? protocol::CommandReason::none
@@ -207,84 +234,153 @@ void Runtime::canTask() {
                             ? protocol::CommandReason::invalid_argument
                             : protocol::CommandReason::invalid_state),
             0};
+
         if (emergency_transaction != 0)
-         ÛÛ[X[™ØØXÚWË™š[š\Ú
-™\Ý[
-NÂˆÙ[™Ø[‘œ˜[YJ›ÝØÛÛŽ™[˜ÛÙJ™\Ý[
-JNÂˆBˆB‚ˆ›ÝØÛÛŽÛÛ[X[™™\Ý[\Ú×Ü™\Ý[ßNÂˆÚ[H
-]Y]YT™XÙZ]™J™\Ý[Ü]Y]YWË	\Ú×Ü™\Ý[
-HOH•QJHÂˆÛÛ[X[™ØØXÚWË™š[š\Ú
-\Ú×Ü™\Ý[
-NÂˆÙ[™Ø[‘œ˜[YJ›ÝØÛÛŽ™[˜ÛÙJ\Ú×Ü™\Ý[
-JNÂˆB‚ˆYˆ
-›ÝÈH™^ÚÚ[™[X]XÜÊHÂˆÛÛœÝ]]Èš[ˆHš[—Ë[[Y]žJ
-NÂˆÛÛœÝ›ÛÛ™Y™\™[˜ÙWÝ˜[YBˆÛÛ›ÛÜ™Y™\™[˜ÙWÝ˜[YË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JNÂˆ›ÝØÛÛŽ’Ú[™[X]XÜÈY\ÜØYÙ^ßNÂˆY\ÜØYÙKœÙ\]Y[˜ÙHHÚ[™[X]XÜ×ÜÙ\]Y[˜ÙJÊÎÂˆY\ÜØYÙKœ›ÛÜ˜]ÈH›ÝØÛÛŽ™[˜ÛÙT›Û
-ˆÛÛ›ÛÜ›ÛÙ]šX][Û—Ü˜YË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JH
-ˆÔ˜YÑYËˆ™Y™\™[˜ÙWÝ˜[Y
-NÂˆY\ÜØYÙKœ›ÛÜ˜]WÜ˜]ÈH›ÝØÛÛŽ™[˜ÛÙT›Û˜]JˆÞ\›×Ü›ÛÜ˜]WÙ×Ë›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JKˆ[]WÝ˜[YË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JJNÂˆY\ÜØYÙK™š[—Ø[™ÛWÜ˜]ÈH›ÝØÛÛŽ™[˜ÛÙQš[[™ÛJˆš[‹˜[™ÛWÙYËš[‹™[˜ÛÙ\—Ý˜[Y	‰ˆš[‹ž™\›×Ý˜[Y
-NÂˆY\ÜØYÙK™š[—Ü˜]WÜ˜]ÈBˆ›ÝØÛÛŽ™[˜ÛÙQš[”˜]Jš[‹œ˜]WÙY×ÜËš[‹œ˜]WÝ˜[Y
-NÂˆÙ[™Ø[‘œ˜[YJ›ÝØÛÛŽ™[˜ÛÙJY\ÜØYÙJJNÂˆ™^ÚÚ[™[X]XÜÈH›ÝÈ
-ÈL	ÌSÂˆB‚ˆYˆ
-›ÝÈH™^ØÛÛ›Û
-HÂˆÛÛœÝ]]ÈÛ˜\ÚÝHÝ]WËœÛ˜\ÚÝ
+          command_cache_.finish(result);
+        sendCanFrame(protocol::encode(result));
+      }
+    }
 
-NÂˆÛÛœÝ›ÛÛ›YÚÝ[YWÝ˜[YHÛ˜\ÚÝ›YÙ™—Ý˜[YÂˆ›ÝØÛÛŽÛÛ›Û[[Y]žHY\ÜØYÙ^ßNÂˆY\ÜØYÙKœÙ\]Y[˜ÙHHÛÛ›ÛÜÙ\]Y[˜ÙJÊÎÂˆY\ÜØYÙKœ™\]Y\ÝYÝÜœ]YWÜ˜]ÈH›ÝØÛÛŽ™[˜ÛÙT™\]Y\ÝYÜœ]YJˆ™\]Y\ÝYØÛÛ›ÛÝÜœ]YWÛ›WË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JKˆÛÛ›ÛØXÝ]™WË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JJNÂˆY\ÜØYÙK™›YÚÙ[\ÙYÜ˜]ÈH›ÝØÛÛŽ™[˜ÛÙQ›YÚ[\ÙY
-ˆÝ]X×ØØ\ÝÝX›OŠ[\ÙY
-Û˜\ÚÝ›ÝÊJH
-ˆKŒKM‹ˆ›YÚÝ[YWÝ˜[Y
-NÂˆÙ[™Ø[‘œ˜[YJ›ÝØÛÛŽ™[˜ÛÙJY\ÜØYÙJJNÂˆ™^ØÛÛ›ÛH›ÝÈ
-ÈL	ÌSÂˆB‚ˆYˆ
-›ÝÈH™^ÜÝ]\ÊHÂˆÛÛœÝ]]ÈÛ˜\ÚÝHÝ]WËœÛ˜\ÚÝ
+    protocol::CommandResult task_result{};
+    while (xQueueReceive(result_queue_, &task_result, 0) == pdTRUE) {
+      command_cache_.finish(task_result);
+      sendCanFrame(protocol::encode(task_result));
+    }
 
-NÂˆÛÛœÝ]]Èš[ˆHš[—Ë[[Y]žJ
-NÂˆÛÛœÝ]]È\˜HH\˜WË[[Y]žJ
-NÂˆ›ÝØÛÛŽ“Z\ÜÚ[Û”Ý]\ÈY\ÜØYÙ^ßNÂˆY\ÜØYÙKœÙ\]Y[˜ÙHHÝ]\×ÜÙ\]Y[˜ÙJÊÎÂˆY\ÜØYÙKœÝ]HHÚ\™TÝ]J
-NÂˆY\ÜØYÙK™›YÚÜÝ]\ÈHÝ]X×ØØ\ÝZ[M—ÝŠˆ
-[]WÝ˜[YË›ØY
+    if (now >= next_kinematics) {
+      const auto fin = fin_.telemetry();
+      const bool reference_valid =
+          control_reference_valid_.load(std::memory_order_acquire);
+      const double roll_deviation_deg =
+          control_roll_deviation_rad_.load(std::memory_order_acquire) *
+          kRadToDeg;
 
-HÈUHˆJHˆ
-×Ý˜[YË›ØY
+      protocol::Kinematics message{};
+      message.sequence = kinematics_sequence++;
+      message.roll_raw =
+          protocol::encodeRoll(roll_deviation_deg, reference_valid);
+      message.roll_rate_raw = protocol::encodeRollRate(
+          gyro_roll_rate_dps_.load(std::memory_order_acquire),
+          imu_valid_.load(std::memory_order_acquire));
+      message.fin_angle_raw =
+          protocol::encodeFinAngle(fin.angle_deg,
+                                   fin.encoder_valid && fin.zero_valid);
+      message.fin_rate_raw =
+          protocol::encodeFinRate(fin.rate_deg_s,
+                                  fin.encoder_valid && fin.rate_valid);
+      sendCanFrame(protocol::encode(message));
+      next_kinematics = now + 10'000ULL;
+    }
 
-HÈ•HˆJHˆ
-š[‹ž™\›×Ý˜[YÈHˆJH
-\˜Kœ™XYHÈHˆJHˆ
-Û˜\ÚÝ™\Þ[Y[ÜÝ\YÈM•HˆJHˆ
-Û˜\ÚÝœÝÙ\—ØÝ]Ù™ˆÈÌ•HˆJJNÂˆY\ÜØYÙK™š[—Û[ÙHBˆš[‹œÝ]HOHXÝX]ÜœÎŽ‘š[”Ý]NŽž™\›×ÚÛˆÈ›ÝØÛÛŽ‘š[“[ÙNŽž™\›×ÚÛˆˆš[‹œÝ]HOHXÝX]ÜœÎŽ‘š[”Ý]NŽœ›ÛØÛÛ›ÛˆÈ›ÝØÛÛŽ‘š[“[ÙNŽœ›ÛØÛÛ›Ûˆˆš[‹œÝ]HOHXÝX]ÜœÎŽ‘š[”Ý]NŽ™œ™YHÈ›ÝØÛÛŽ‘š[“[ÙNŽ™œ™YBˆˆ›ÝØÛÛŽ‘š[“[ÙNŽ[šÛ›ÝÛŽÂˆY\ÜØYÙKœ\˜WÛ[ÙHH\˜K›[ÙNÂˆY\ÜØYÙKœ\˜XÚ]WØ[™ÛWÜ˜]ÈBˆ›ÝØÛÛŽ™[˜ÛÙT\˜XÚ]P[™ÛJ\˜KœÜÚ][Û—ÙYË\˜KœÜÚ][Û—Ý˜[Y
-NÂˆÙ[™Ø[‘œ˜[YJ›ÝØÛÛŽ™[˜ÛÙJY\ÜØYÙJJNÂˆ™^ÜÝ]\ÈH›ÝÈ
-ÈL	ÌSÂˆB‚ˆYˆ
-›ÝÈH™^ÛÊHÂˆ›ÝØÛÛŽ“Õ[[Y]žHY\ÜØYÙ^ßNÂˆY\ÜØYÙKœÙ\]Y[˜ÙHH×ÜÙ\]Y[˜ÙJÊÎÂˆÛÛœÝ›ÛÛ˜[YH×Ý˜[YË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JNÂˆY\ÜØYÙKœ™\ÜÝ\™WÜ˜]ÈH›ÝØÛÛŽ™[˜ÛÙSÔ™\ÜÝ\™Jˆ×Ü™\ÜÝ\™WÚWË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JK˜[Y
-NÂˆY\ÜØYÙK[\\˜]\™WÜ˜]ÈH›ÝØÛÛŽ™[˜ÛÙSÕ[\\˜]\™Jˆ×Ý[\\˜]\™WØ×Ë›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JK˜[Y
-NÂˆÙ[™Ø[‘œ˜[YJ›ÝØÛÛŽ™[˜ÛÙJY\ÜØYÙJJNÂˆ™^ÛÈH›ÝÈ
-È	ÌSÂˆB‚ˆYˆ
-›ÝÈH™^ØZ\œÜYY
-HÂˆ›ÝØÛÛŽZ\œÜYY[[Y]žHY\ÜØYÙ^ßNÂˆY\ÜØYÙKœÙ\]Y[˜ÙHHZ\œÜYYÜÙ\]Y[˜ÙJÊÎÂˆY\ÜØYÙK˜Z\œÜYYÜ˜]ÈH›ÝØÛÛŽ™[˜ÛÙPZ\œÜYY
-ˆZ\œÜYYÛ\×Ë›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JKˆZ\œÜYYÝ˜[YË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JJNÂˆÙ[™Ø[‘œ˜[YJ›ÝØÛÛŽ™[˜ÛÙJY\ÜØYÙJJNÂˆ™^ØZ\œÜYYH›ÝÈ
-ÈL	ÌSÂˆB‚ˆYˆ
-›ÝÈH™^ØÛÛ›ÛÜ›Û
-HÂˆÛÛœÝ›ÛÛ™Y™\™[˜ÙWÝ˜[YBˆÛÛ›ÛÜ™Y™\™[˜ÙWÝ˜[YË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JNÂˆÛÛœÝ›ÛÛXÝ]™HHÛÛ›ÛØXÝ]™WË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JNÂˆÛÛœÝZ[Ý]™[ÜÙ\]Y[˜ÙHBˆ™Y™\™[˜ÙWØØ\\™WÙ]™[ÜÙ\]Y[˜ÙWË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JNÂˆ›ÝØÛÛŽÛÛ›Û›Û[[Y]žUŒˆY\ÜØYÙ^ßNÂˆY\ÜØYÙKœÙ\]Y[˜ÙHHÛÛ›ÛÜ›ÛÜÙ\]Y[˜ÙJÊÎÂˆY\ÜØYÙK˜ÛÛ›ÛÜ›ÛÜ™Y™\™[˜ÙWÝ[Ü˜\YÜ˜]ÈBˆ›ÝØÛÛŽ™[˜ÛÙT›Û
-Œ™Y™\™[˜ÙWÝ˜[Y
-NÂˆY\ÜØYÙKœ›ÛÙ]šX][Û—Ý[Ü˜\YÜ˜]ÈH›ÝØÛÛŽ™[˜ÛÙT›Û
-ˆÛÛ›ÛÜ›ÛÙ]šX][Û—Ü˜YË›ØY
-ÝŽ›Y[[ÜžWÛÜ™\—ØXÜ]Z\™JH
-ˆÔ˜YÑYËˆ™Y™\™[˜ÙWÝ˜[Y
-NÂˆYˆ
-™Y™\™[˜ÙWÝ˜[Y
-BˆY\ÜØYÙK™›YÜÈH›ÝØÛÛŽÛÛ›Û›Û[[Y]žUŒŽŽœ™Y™\™[˜ÙWÝ˜[YÂˆYˆ
-XÝ]™JBˆY\ÜØYÙK™›YÜÈH›ÝØÛÛŽÛÛ›Û›Û[[Y]žUŒŽŽ˜ÛÛ›ÛØXÝ]™NÂˆYˆ
-]™[ÜÙ\]Y[˜ÙHOH\ÝÜ™Y™\™[˜ÙWÙ]™[ÜÙ\]Y[˜ÙJHÂˆY\ÜØYÙK™›YÜÈH›ÝØÛÛŽÛÛ›Û›Û[[Y]žUŒŽŽ‚ˆ™Y™\™[˜ÙWØØ\\™YÜÚ[˜ÙWÜ™]š[Ý\×Ùœ˜[YNÂˆ\ÝÜ™Y™\™[˜ÙWÙ]™[ÜÙ\]Y[˜ÙHH]™[ÜÙ\]Y[˜ÙNÂˆBˆY\ÜØYÙKœ™Y™\™[˜ÙWØØ\\™WÙ]™[ÜÙ\]Y[˜ÙHH]™[ÜÙ\]Y[˜ÙNÂˆÙ[™Ø[‘œ˜[YJ›ÝØÛÛŽ™[˜ÛÙJY\ÜØYÙJJNÂˆ™^ØÛÛ›ÛÜ›ÛH›ÝÈ
-ÈL	ÌSÂˆB‚ˆ•\ÚÑ[^U[[
-	ØZÙKT×Õ×ÕPÒÔÊJJNÂˆBŸB‚ŸHËÈ˜[Y\ÜXÙH[[YB
+    if (now >= next_control) {
+      const auto snapshot = state_.snapshot();
+      protocol::ControlTelemetry message{};
+      message.sequence = control_sequence++;
+      message.requested_torque_raw = protocol::encodeRequestedTorque(
+          requested_control_torque_nm_.load(std::memory_order_acquire),
+          control_active_.load(std::memory_order_acquire));
+      message.flight_elapsed_raw = protocol::encodeFlightElapsed(
+          static_cast<double>(elapsed(snapshot, now)) * 1.0e-6,
+          snapshot.liftoff_valid);
+      sendCanFrame(protocol::encode(message));
+      next_control = now + 10'000ULL;
+    }
+
+    if (now >= next_status) {
+      const auto snapshot = state_.snapshot();
+      const auto fin = fin_.telemetry();
+      const auto para = para_.telemetry();
+
+      protocol::MissionStatus message{};
+      message.sequence = status_sequence++;
+      message.state = wireState();
+      message.flight_status = static_cast<uint16_t>(
+          (imu_valid_.load(std::memory_order_acquire) ? 1U : 0U) |
+          (lps_valid_.load(std::memory_order_acquire) ? 2U : 0U) |
+          (fin.zero_valid ? 4U : 0U) |
+          (para.ready ? 8U : 0U) |
+          (snapshot.deployment_started ? 16U : 0U) |
+          (snapshot.power_cutoff ? 32U : 0U));
+      message.fin_mode =
+          fin.state == actuators::FinState::zero_hold
+              ? protocol::FinMode::zero_hold
+          : fin.state == actuators::FinState::roll_control
+              ? protocol::FinMode::roll_control
+          : fin.state == actuators::FinState::free
+              ? protocol::FinMode::free
+              : protocol::FinMode::unknown;
+      message.para_mode = para.mode;
+      message.parachute_angle_raw =
+          protocol::encodeParachuteAngle(para.position_deg,
+                                         para.position_valid);
+      sendCanFrame(protocol::encode(message));
+      next_status = now + 100'000ULL;
+    }
+
+    if (now >= next_lps) {
+      protocol::LpsTelemetry message{};
+      message.sequence = lps_sequence++;
+      const bool valid = lps_valid_.load(std::memory_order_acquire);
+      message.pressure_raw = protocol::encodeLpsPressure(
+          lps_pressure_hpa_.load(std::memory_order_acquire), valid);
+      message.temperature_raw = protocol::encodeLpsTemperature(
+          lps_temperature_c_.load(std::memory_order_acquire), valid);
+      sendCanFrame(protocol::encode(message));
+      next_lps = now + 40'000ULL;
+    }
+
+    if (now >= next_airspeed) {
+      protocol::AirspeedTelemetry message{};
+      message.sequence = airspeed_sequence++;
+      const bool valid = airspeed_valid_.load(std::memory_order_acquire);
+      message.airspeed_raw = protocol::encodeAirspeed(
+          airspeed_mps_.load(std::memory_order_acquire), valid);
+      sendCanFrame(protocol::encode(message));
+      next_airspeed = now + 10'000ULL;
+    }
+
+    if (now >= next_control_roll) {
+      const bool reference_valid =
+          control_reference_valid_.load(std::memory_order_acquire);
+      const bool control_active =
+          control_active_.load(std::memory_order_acquire);
+      const uint8_t reference_event =
+          reference_capture_event_sequence_.load(std::memory_order_acquire);
+      const double deviation_deg =
+          control_roll_deviation_rad_.load(std::memory_order_acquire) *
+          kRadToDeg;
+
+      protocol::ControlRollTelemetryV2 message{};
+      message.sequence = control_roll_sequence++;
+      message.control_roll_reference_unwrapped_raw =
+          protocol::encodeRoll(0.0, reference_valid);
+      message.roll_deviation_unwrapped_raw =
+          protocol::encodeRoll(deviation_deg, reference_valid);
+      if (reference_valid)
+        message.flags |= protocol::ControlRollTelemetryV2::reference_valid;
+      if (reference_event != last_reference_event_sequence)
+        message.flags |=
+            protocol::ControlRollTelemetryV2::
+                reference_captured_since_previous_frame;
+      if (control_active)
+        message.flags |= protocol::ControlRollTelemetryV2::control_active;
+      if (reference_valid &&
+          message.control_roll_reference_unwrapped_raw == 0x800AU)
+        message.flags |=
+            protocol::ControlRollTelemetryV2::reference_out_of_range;
+      if (reference_valid &&
+          message.roll_deviation_unwrapped_raw == 0x800AU)
+        message.flags |=
+            protocol::ControlRollTelemetryV2::deviation_out_of_range;
+      message.reference_capture_event_sequence = reference_event;
+      last_reference_event_sequence = reference_event;
+
+      sendCanFrame(protocol::encode(message));
+      next_control_roll = now + 10'000ULL;
+    }
+
+    vTaskDelayUntil(&wake, pdMS_TO_TICKS(1));
+  }
+}
+
+} // namespace runtime
