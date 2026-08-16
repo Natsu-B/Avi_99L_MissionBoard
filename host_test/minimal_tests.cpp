@@ -1,9 +1,17 @@
 #include <cassert>
+#include <cmath>
 
+#include "config/flight.hpp"
+#include "control/roll_control.hpp"
 #include "mission/flight_detectors.hpp"
 #include "mission/state_machine.hpp"
 #include "protocol/command_cache.hpp"
 #include "protocol/wire.hpp"
+#include "sensors/airspeed.hpp"
+
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+}
 
 int main() {
   mission::StateMachine state;
@@ -37,7 +45,8 @@ int main() {
   mission::PressureApexDetector apex;
   bool apex_detected = false;
   for (int i = 0; i < 40; ++i)
-    apex_detected = apex.update(1000.0 + 0.01 * i, true, 11'000'000) || apex_detected;
+    apex_detected =
+        apex.update(1000.0 + 0.01 * i, true, 11'000'000) || apex_detected;
   assert(apex_detected);
 
   protocol::CommandCache cache;
@@ -47,7 +56,8 @@ int main() {
   assert(cache.lookup(request).kind == protocol::CommandCache::Lookup::miss);
   cache.rememberAccepted(request);
   assert(cache.lookup(request).kind == protocol::CommandCache::Lookup::replay);
-  protocol::CommandResult final{1, request.command, protocol::CommandPhase::completed,
+  protocol::CommandResult final{1, request.command,
+                                protocol::CommandPhase::completed,
                                 protocol::CommandReason::none, 0};
   cache.finish(final);
   assert(cache.lookup(request).result.phase == protocol::CommandPhase::completed);
@@ -56,13 +66,104 @@ int main() {
   assert(cache.lookup(conflict).kind == protocol::CommandCache::Lookup::conflict);
 
   protocol::CanFrame frame{};
-  frame.identifier = static_cast<uint16_t>(protocol::CanId::generic_command_request);
+  frame.identifier =
+      static_cast<uint16_t>(protocol::CanId::generic_command_request);
   frame.data_length = 8;
   frame.data[0] = 7;
-  frame.data[1] = static_cast<uint8_t>(protocol::CommandCode::fin_hold_current);
+  frame.data[1] =
+      static_cast<uint8_t>(protocol::CommandCode::fin_hold_current);
   protocol::GenericCommandRequest decoded{};
   assert(protocol::decodeGenericCommand(frame, decoded));
   assert(decoded.transaction_id == 7);
   assert(decoded.command == frame.data[1]);
+
+  // +8秒gateはICMまたはFin zeroが欠ければそのflightで永久停止する。
+  control::FlightControlSession gate_ok{
+      flight_config::kGyroIntegrationMaximumGapUs,
+      flight_config::kAirspeedPermanentStopMps};
+  assert(gate_ok.evaluateEligibility(true, true));
+  assert(!gate_ok.permanentlyDisabled());
+
+  control::FlightControlSession gate_imu_ng{
+      flight_config::kGyroIntegrationMaximumGapUs,
+      flight_config::kAirspeedPermanentStopMps};
+  assert(!gate_imu_ng.evaluateEligibility(false, true));
+  assert(gate_imu_ng.permanentlyDisabled());
+
+  control::FlightControlSession gate_zero_ng{
+      flight_config::kGyroIntegrationMaximumGapUs,
+      flight_config::kAirspeedPermanentStopMps};
+  assert(!gate_zero_ng.evaluateEligibility(true, false));
+  assert(gate_zero_ng.permanentlyDisabled());
+
+  // unavailableは永久停止しないが、valid <= 60 m/sは永久停止する。
+  gate_ok.observeAirspeed(false, 0.0);
+  assert(!gate_ok.permanentlyDisabled());
+  gate_ok.observeAirspeed(true, 60.1);
+  assert(!gate_ok.permanentlyDisabled());
+  gate_ok.observeAirspeed(true, 60.0);
+  assert(gate_ok.permanentlyDisabled());
+
+  // Control開始時点をroll偏差0として、gyroを台形積分する。
+  control::FlightControlSession integration{
+      flight_config::kGyroIntegrationMaximumGapUs,
+      flight_config::kAirspeedPermanentStopMps};
+  assert(integration.evaluateEligibility(true, true));
+  const double ten_dps = 10.0 * kPi / 180.0;
+  assert(integration.startReference(1'000'000, ten_dps));
+  assert(std::abs(integration.rollDeviationRad()) < 1.0e-12);
+  for (uint64_t time = 1'001'000; time <= 1'100'000; time += 1'000)
+    assert(integration.observeGyro(time, true, ten_dps));
+  assert(std::abs(integration.rollDeviationRad() - 1.0 * kPi / 180.0) <
+         1.0e-9);
+
+  // 短い欠落は復帰可能、上限を超えたgapは永久停止。
+  control::FlightControlSession short_gap{
+      flight_config::kGyroIntegrationMaximumGapUs,
+      flight_config::kAirspeedPermanentStopMps};
+  assert(short_gap.evaluateEligibility(true, true));
+  assert(short_gap.startReference(2'000'000, 0.0));
+  assert(short_gap.observeGyro(2'003'000, false, 0.0));
+  assert(short_gap.observeGyro(2'004'000, true, 0.0));
+  assert(!short_gap.permanentlyDisabled());
+  assert(!short_gap.observeGyro(2'010'000, true, 0.0));
+  assert(short_gap.permanentlyDisabled());
+
+  // gain scheduleはstate feedbackを出力し、torque limitを守る。
+  control::RollController controller{flight_config::kRollGainSchedule,
+                                     flight_config::kRollControlTorqueLimitNm};
+  const auto control_output = controller.compute(
+      {1.0, 0.0, 0.0, 0.0, 100.0});
+  assert(control_output.valid);
+  assert(std::abs(control_output.torque_nm + 0.08) < 1.0e-12);
+
+  // SSC差圧filterはcompile-time zeroを引き、負圧許容範囲内を0へclipする。
+  sensors::DifferentialPressureFilter dp_filter{10.0, 5.0, 4};
+  double filtered = 0.0;
+  assert(dp_filter.update(9.0, filtered));
+  assert(filtered == 0.0);
+  assert(!dp_filter.update(0.0, filtered));
+
+  const auto zero_speed =
+      sensors::computeSaintVenantAirspeed(100000.0, 0.0, 20.0, 0.92);
+  assert(zero_speed.valid && zero_speed.airspeed_mps == 0.0);
+  const auto positive_speed =
+      sensors::computeSaintVenantAirspeed(100000.0, 1000.0, 20.0, 0.92);
+  assert(positive_speed.valid && positive_speed.airspeed_mps > 0.0);
+
+  // wire互換: Control packetとairspeed packetのID/lengthを固定する。
+  protocol::ControlTelemetry control_message{};
+  control_message.requested_torque_raw =
+      protocol::encodeRequestedTorque(0.5, true);
+  const auto control_frame = protocol::encode(control_message);
+  assert(control_frame.identifier ==
+         static_cast<uint16_t>(protocol::CanId::control_telemetry));
+  assert(control_frame.data_length == 4);
+  const auto airspeed_frame = protocol::encode(protocol::AirspeedTelemetry{
+      1, protocol::encodeAirspeed(123.0, true)});
+  assert(airspeed_frame.identifier ==
+         static_cast<uint16_t>(protocol::CanId::airspeed_telemetry));
+  assert(airspeed_frame.data_length == 2);
+
   return 0;
 }

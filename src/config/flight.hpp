@@ -1,7 +1,10 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+
+#include "control/roll_control.hpp"
 
 namespace flight_config {
 
@@ -35,6 +38,37 @@ constexpr double kMotorBusVoltageV = 9.0;
 constexpr double kMotorMaxCurrentA = 2.0;
 constexpr double kMotorMaximumDuty = 1.0;
 constexpr bool kPositiveTorqueUsesIn1 = true;
+constexpr double kFinOutwardCommandLimitDeg = 15.0;
+
+// Control用の個体固定値。runtime calibration/NVSでは変更しない。
+// TODO(HW_TEST): 飛行個体のcharacterization値へ置換する。
+constexpr double kGyroRollBiasDps = 0.0;
+constexpr double kSscZeroOffsetPa = 0.0;
+constexpr double kDifferentialPressureNegativeTolerancePa = 5.0;
+constexpr std::size_t kDifferentialPressureMovingAverageSamples = 8;
+constexpr double kPitotPressureCorrectionCoefficient = 0.92;
+
+constexpr uint64_t kImuFreshUs = 5'000ULL;
+constexpr uint64_t kFinFreshUs = 5'000ULL;
+constexpr uint64_t kLpsFreshUs = 120'000ULL;
+constexpr uint64_t kSscFreshUs = 15'000ULL;
+constexpr uint64_t kAirspeedFreshUs = 15'000ULL;
+constexpr uint64_t kGyroIntegrationMaximumGapUs = 5'000ULL;
+constexpr double kAirspeedPermanentStopMps = 60.0;
+
+// TODO(SIMULATION): Spicaで確定したgain tableへ置換する。
+// 現値は旧MissionBoardの暫定候補で、flight qualification済みではない。
+inline constexpr std::array<control::GainPoint, 7> kRollGainSchedule{{
+    {60.0, {0.08, 2.32, 0.04, 0.296}},
+    {80.0, {0.08, 2.32, 0.04, 0.296}},
+    {100.0, {0.08, 2.32, 0.04, 0.296}},
+    {120.0, {0.08, 2.32, 0.04, 0.296}},
+    {140.0, {0.08, 2.32, 0.04, 0.296}},
+    {160.0, {0.08, 2.32, 0.04, 0.296}},
+    {180.0, {0.08, 2.32, 0.04, 0.296}},
+}};
+// TODO(SIMULATION/HW_TEST): 最終Control authorityへ置換する。
+constexpr double kRollControlTorqueLimitNm = 1.21208;
 
 constexpr uint32_t kLogRateHz = 1'000;
 constexpr uint32_t kLogPeriodUs = 1'000;

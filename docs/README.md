@@ -13,6 +13,7 @@
 - [06_protocol_compatibility.md](06_protocol_compatibility.md): CAN wire互換と他基板の凍結方針
 - [07_hardware_and_constants.md](07_hardware_and_constants.md): ESP32-S3、pin、固定値、暫定値
 - [08_safety_reset_and_open_items.md](08_safety_reset_and_open_items.md): Safety、reset、未確定事項、実機確認
+- [09_roll_control_runtime.md](09_roll_control_runtime.md): RollControl実装、+8秒gate、SSC/airspeed、60 m/s永久停止
 
 ## Source of truth
 
@@ -34,7 +35,8 @@
 - CommandReceiveでの最小actuator操作
 - 離床検知
 - Flight timer管理
-- 動翼0度保持、および次段で追加するロール制御
+- 動翼0度保持とFlight内RollControl
+- SSC/LPSからのairspeed計算とControl availability判定
 - 頂点判定とtimer fallbackによるパラシュート開放
 - Descent中のactuator安全化
 - CAN telemetry / command compatibility
