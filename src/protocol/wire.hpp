@@ -3,6 +3,8 @@
 #include <array>
 #include <cstdint>
 
+#include "diagnostics/device_health.hpp"
+
 namespace protocol {
 
 enum class CanId : uint16_t {
@@ -19,6 +21,7 @@ enum class CanId : uint16_t {
   lps_telemetry = 0x108,
   airspeed_telemetry = 0x109,
   control_roll_telemetry_v2 = 0x10A,
+  device_health_telemetry = 0x10B,
 };
 
 enum class WireMissionState : uint8_t {
@@ -137,6 +140,14 @@ struct ControlRollTelemetryV2 {
   uint8_t flags{};
   uint8_t reference_capture_event_sequence{};
 };
+struct DeviceHealthTelemetry {
+  uint8_t sequence{};
+  diagnostics::DeviceState icm42688{diagnostics::DeviceState::unavailable};
+  diagnostics::DeviceState as5047d{diagnostics::DeviceState::unavailable};
+  diagnostics::DeviceState lps25hb{diagnostics::DeviceState::unavailable};
+  diagnostics::DeviceState ssc{diagnostics::DeviceState::unavailable};
+  diagnostics::DeviceState mission_sd{diagnostics::DeviceState::unavailable};
+};
 struct CanFrame {
   uint32_t identifier{};
   uint8_t data_length{};
@@ -156,6 +167,7 @@ struct CanFrame {
 [[nodiscard]] CanFrame encode(const LpsTelemetry &telemetry);
 [[nodiscard]] CanFrame encode(const AirspeedTelemetry &telemetry);
 [[nodiscard]] CanFrame encode(const ControlRollTelemetryV2 &telemetry);
+[[nodiscard]] CanFrame encode(const DeviceHealthTelemetry &telemetry);
 [[nodiscard]] uint8_t encodeFinAngle(double degrees, bool valid);
 [[nodiscard]] uint16_t encodeFinRate(double degrees_per_second, bool valid);
 [[nodiscard]] uint16_t encodeRoll(double degrees, bool valid);

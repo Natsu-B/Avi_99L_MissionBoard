@@ -14,6 +14,13 @@ inline double unwrapEncoderDelta(double current_raw_rad,
   return std::remainder(current_raw_rad - previous_raw_rad, kTwoPi);
 }
 
+// 再接続後の1回転角を、切断前の連続角に最も近いmulti-turn branchへ復元する。
+inline double nearestEquivalentAngle(double raw_rad,
+                                     double reference_unwrapped_rad) {
+  return raw_rad +
+         std::round((reference_unwrapped_rad - raw_rad) / kTwoPi) * kTwoPi;
+}
+
 // motor/encoder軸の連続角を出力軸Fin角へ変換する。
 inline double encoderToFinRadians(double encoder_rad, double gear_ratio) {
   return encoder_rad / gear_ratio;

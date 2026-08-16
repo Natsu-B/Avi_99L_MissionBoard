@@ -61,7 +61,8 @@ LogRecord FlightLogger::serialize(const LogSample &sample,
   record.pressure_pa = sample.pressure_pa;
   record.para_angle_decideg = sample.para_angle_decideg;
   record.crc16 = 0;
-  record.crc16 = crc16(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
+  record.crc16 =
+      crc16(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
   return record;
 }
 
@@ -171,8 +172,12 @@ void FlightLogger::writerEntry(void *context) {
 }
 
 esp_err_t FlightLogger::mountSd() {
-  if (mounted_)
+  if (mounted_) {
+    sd_health_.markHealthy();
     return ESP_OK;
+  }
+
+  sd_health_.markRecovering();
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
   slot.width = 4;
@@ -189,6 +194,10 @@ esp_err_t FlightLogger::mountSd() {
   const esp_err_t result =
       esp_vfs_fat_sdmmc_mount(kMountPoint, &host, &slot, &mount, &card_);
   mounted_ = result == ESP_OK;
+  if (mounted_)
+    sd_health_.markHealthy();
+  else
+    sd_health_.markFailed();
   return result;
 }
 
@@ -220,17 +229,20 @@ esp_err_t FlightLogger::ensureFile() {
   fd_ = ::open(kFlightPath, flags, 0664);
   if (fd_ < 0) {
     closeSd();
+    sd_health_.markFailed();
     next_sd_retry_us_ = now + 1'000'000ULL;
     return ESP_FAIL;
   }
   if (!truncate && ::lseek(fd_, 0, SEEK_END) < 0) {
     closeSd();
+    sd_health_.markFailed();
     next_sd_retry_us_ = now + 1'000'000ULL;
     return ESP_FAIL;
   }
   const off_t pos = ::lseek(fd_, 0, SEEK_CUR);
   file_bytes_ = pos >= 0 ? static_cast<uint64_t>(pos) : 0;
   truncate_pending_.store(false, std::memory_order_release);
+  sd_health_.markHealthy();
   return ESP_OK;
 }
 
@@ -243,7 +255,8 @@ esp_err_t FlightLogger::writeBatch(std::size_t count) {
     return ESP_FAIL;
   std::size_t offset = 0;
   while (offset < bytes) {
-    const ssize_t written = ::write(fd_, batch_.data() + offset, bytes - offset);
+    const ssize_t written =
+        ::write(fd_, batch_.data() + offset, bytes - offset);
     if (written > 0) {
       offset += static_cast<std::size_t>(written);
       continue;
@@ -268,6 +281,7 @@ bool FlightLogger::drainBatch(bool allow_partial) {
     return false;
   if (ensureFile() != ESP_OK)
     return false;
+
   const std::size_t count = static_cast<std::size_t>(
       std::min<uint64_t>(available, kBatchRecords));
   for (std::size_t index = 0; index < count; ++index) {
@@ -275,26 +289,61 @@ bool FlightLogger::drainBatch(bool allow_partial) {
     std::memcpy(batch_.data() + index * sizeof(LogRecord), &record,
                 sizeof(LogRecord));
   }
+
   const esp_err_t result = writeBatch(count);
   if (result != ESP_OK) {
     closeSd();
-    next_sd_retry_us_ = static_cast<uint64_t>(esp_timer_get_time()) + 1'000'000ULL;
+    sd_health_.markFailed();
+    next_sd_retry_us_ =
+        static_cast<uint64_t>(esp_timer_get_time()) + 1'000'000ULL;
     return false;
   }
+
+  sd_health_.markHealthy();
   read_index_.store(read + count, std::memory_order_release);
   return true;
 }
 
 void FlightLogger::writerLoop() {
+  uint64_t next_sd_status_us = 0;
+
   for (;;) {
     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+
+    // 飛行前からhealthを出せるよう、SD probe/retryは低優先度writerだけが行う。
+    if (!mounted_ && now >= next_sd_retry_us_) {
+      const esp_err_t result = mountSd();
+      if (result != ESP_OK)
+        next_sd_retry_us_ = now + 1'000'000ULL;
+    }
+
+    if (mounted_ && card_ != nullptr && now >= next_sd_status_us) {
+      if (sdmmc_get_status(card_) == ESP_OK) {
+        sd_health_.markHealthy();
+      } else {
+        closeSd();
+        sd_health_.markFailed();
+        next_sd_retry_us_ = now + 1'000'000ULL;
+      }
+      next_sd_status_us = now + 1'000'000ULL;
+    }
+
     const bool flush = flush_requested_.load(std::memory_order_acquire);
     while (drainBatch(flush)) {
     }
+
     if (flush && read_index_.load(std::memory_order_acquire) ==
                      write_index_.load(std::memory_order_acquire)) {
-      if (fd_ >= 0)
-        (void)::fsync(fd_);
+      if (fd_ >= 0) {
+        if (::fsync(fd_) == 0) {
+          sd_health_.markHealthy();
+        } else {
+          closeSd();
+          sd_health_.markFailed();
+          next_sd_retry_us_ = now + 1'000'000ULL;
+        }
+      }
       flush_requested_.store(false, std::memory_order_release);
     }
   }

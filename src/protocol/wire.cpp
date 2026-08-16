@@ -5,6 +5,7 @@
 
 namespace protocol {
 namespace {
+
 void putU16(std::array<uint8_t, 8> &data, std::size_t offset, uint16_t value) {
   data[offset] = static_cast<uint8_t>(value);
   data[offset + 1] = static_cast<uint8_t>(value >> 8U);
@@ -29,6 +30,7 @@ uint16_t signed16(double value, double resolution, uint16_t invalid) {
     return invalid;
   return static_cast<uint16_t>(static_cast<int16_t>(count));
 }
+
 } // namespace
 
 bool decodeGenericCommand(const CanFrame &frame,
@@ -110,6 +112,16 @@ CanFrame encode(const ControlRollTelemetryV2 &telemetry) {
   putU16(frame.data, 4, telemetry.roll_deviation_unwrapped_raw);
   frame.data[6] = static_cast<uint8_t>(telemetry.flags & 0x1FU);
   frame.data[7] = telemetry.reference_capture_event_sequence;
+  return frame;
+}
+CanFrame encode(const DeviceHealthTelemetry &telemetry) {
+  auto frame = makeFrame(CanId::device_health_telemetry, 6);
+  frame.data[0] = telemetry.sequence;
+  frame.data[1] = static_cast<uint8_t>(telemetry.icm42688);
+  frame.data[2] = static_cast<uint8_t>(telemetry.as5047d);
+  frame.data[3] = static_cast<uint8_t>(telemetry.lps25hb);
+  frame.data[4] = static_cast<uint8_t>(telemetry.ssc);
+  frame.data[5] = static_cast<uint8_t>(telemetry.mission_sd);
   return frame;
 }
 uint8_t encodeFinAngle(double degrees, bool valid) {

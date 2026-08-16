@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "diagnostics/device_health.hpp"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -63,6 +64,9 @@ public:
   [[nodiscard]] esp_err_t append(const LogSample &sample);
   void finishFlight();
 
+  [[nodiscard]] diagnostics::DeviceState sdState() const {
+    return sd_health_.state();
+  }
   [[nodiscard]] std::size_t psramBytes() const { return psram_bytes_; }
   [[nodiscard]] std::size_t capacityRecords() const { return capacity_records_; }
   [[nodiscard]] uint32_t droppedRecords() const {
@@ -105,6 +109,7 @@ private:
   std::atomic<bool> truncate_pending_{};
   std::atomic<bool> flush_requested_{};
 
+  diagnostics::DeviceHealth sd_health_{};
   sdmmc_card_t *card_{};
   bool mounted_{};
   int fd_{-1};

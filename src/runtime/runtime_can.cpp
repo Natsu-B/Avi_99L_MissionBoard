@@ -26,6 +26,10 @@ uint64_t elapsed(const mission::Snapshot &snapshot, uint64_t now_us) {
   return now_us - snapshot.liftoff_us;
 }
 
+bool deviceHealthy(diagnostics::DeviceState state) {
+  return state == diagnostics::DeviceState::healthy;
+}
+
 } // namespace
 
 void Runtime::canTask() {
@@ -35,6 +39,7 @@ void Runtime::canTask() {
   uint8_t control_roll_sequence = 0;
   uint8_t lps_sequence = 0;
   uint8_t airspeed_sequence = 0;
+  uint8_t device_health_sequence = 0;
   uint8_t last_reference_event_sequence = 0;
 
   uint64_t next_status = 0;
@@ -43,23 +48,30 @@ void Runtime::canTask() {
   uint64_t next_control_roll = 0;
   uint64_t next_lps = 0;
   uint64_t next_airspeed = 0;
+  uint64_t next_device_health = 0;
 
   TickType_t wake = xTaskGetTickCount();
   uint64_t next_can_retry = 0;
   uint64_t next_can_status = 0;
+  bool can_healthy = false;
 
   for (;;) {
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
 
     if (!can_.initialized() && now >= next_can_retry) {
-      (void)initializeCan();
+      can_healthy = initializeCan() == ESP_OK;
       next_can_retry = now + 1'000'000ULL;
     }
     if (can_.initialized() && now >= next_can_status) {
       CANCREATE::Status status{};
-      if (can_.getStatus(status) == ESP_OK &&
-          status.state == CANCREATE::State::bus_off)
-        (void)can_.recover(avi::Timeout::milliseconds(10));
+      const esp_err_t status_result = can_.getStatus(status);
+      can_healthy =
+          status_result == ESP_OK && status.state != CANCREATE::State::bus_off;
+      if (status_result == ESP_OK &&
+          status.state == CANCREATE::State::bus_off) {
+        can_healthy =
+            can_.recover(avi::Timeout::milliseconds(10)) == ESP_OK;
+      }
       next_can_status = now + 100'000ULL;
     }
 
@@ -287,20 +299,28 @@ void Runtime::canTask() {
     }
 
     if (now >= next_status) {
-      const auto snapshot = state_.snapshot();
       const auto fin = fin_.telemetry();
       const auto para = para_.telemetry();
 
       protocol::MissionStatus message{};
       message.sequence = status_sequence++;
       message.state = wireState();
+      // Vault 04aのFlightStatus bit割当へ合わせる。
+      // bit5/6 battery, bit7 ComBoard SD, bit9..14 event系はMission単独で
+      // 正確に生成できないためここでは0とし、個別device状態は0x10Bへ送る。
       message.flight_status = static_cast<uint16_t>(
-          (imu_valid_.load(std::memory_order_acquire) ? 1U : 0U) |
-          (lps_valid_.load(std::memory_order_acquire) ? 2U : 0U) |
-          (fin.zero_valid ? 4U : 0U) |
-          (para.ready ? 8U : 0U) |
-          (snapshot.deployment_started ? 16U : 0U) |
-          (snapshot.power_cutoff ? 32U : 0U));
+          (lps_liftoff_detected_.load(std::memory_order_acquire) ? 1U << 0U
+                                                                  : 0U) |
+          (imu_liftoff_detected_.load(std::memory_order_acquire) ? 1U << 1U
+                                                                  : 0U) |
+          (deviceHealthy(imu_health_.state()) ? 1U << 2U : 0U) |
+          (para.ready ? 1U << 3U : 0U) |
+          (control_active_.load(std::memory_order_acquire) ? 1U << 4U : 0U) |
+          (can_healthy ? 1U << 8U : 0U) |
+          (control_permanently_disabled_.load(std::memory_order_acquire)
+               ? 1U << 15U
+               : 0U));
+
       message.fin_mode =
           fin.state == actuators::FinState::zero_hold
               ? protocol::FinMode::zero_hold
@@ -376,7 +396,20 @@ void Runtime::canTask() {
       last_reference_event_sequence = reference_event;
 
       sendCanFrame(protocol::encode(message));
-      next_control_roll = now + 10'000ULL;
+      next_control_roll = now + 100'000ULL;
+    }
+
+    if (now >= next_device_health) {
+      const auto fin = fin_.telemetry();
+      protocol::DeviceHealthTelemetry message{};
+      message.sequence = device_health_sequence++;
+      message.icm42688 = imu_health_.state();
+      message.as5047d = fin.encoder_state;
+      message.lps25hb = lps_health_.state();
+      message.ssc = ssc_health_.state();
+      message.mission_sd = logger_.sdState();
+      sendCanFrame(protocol::encode(message));
+      next_device_health = now + 100'000ULL;
     }
 
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(1));

@@ -22,6 +22,7 @@ constexpr ledc_channel_t kIn1Channel = LEDC_CHANNEL_0;
 constexpr ledc_channel_t kIn2Channel = LEDC_CHANNEL_1;
 constexpr ledc_timer_bit_t kDutyResolution = LEDC_TIMER_10_BIT;
 constexpr uint32_t kMaximumDutyCount = (1U << 10U) - 1U;
+constexpr uint8_t kEncoderFailureThreshold = 3U;
 
 } // namespace
 
@@ -55,36 +56,80 @@ esp_err_t FinActuator::initializeMotor() {
   return result;
 }
 
-esp_err_t FinActuator::initialize() {
+esp_err_t FinActuator::initializeEncoderTransport() {
+  if (encoder_.initialized()) {
+    const esp_err_t result = encoder_.end();
+    if (result != ESP_OK)
+      return result;
+  }
+  if (spi_.initialized()) {
+    const esp_err_t result = spi_.end();
+    if (result != ESP_OK)
+      return result;
+  }
+
   SPICREATE::Config spi_config{};
   spi_config.host = board::kEncoderSpiHost;
   spi_config.sck = board::kEncoderSclk;
   spi_config.miso = board::kEncoderMiso;
   spi_config.mosi = board::kEncoderMosi;
-  spi_config.transaction_timeout = avi::Timeout::milliseconds(2);
+  // SPI2はAS5047D専用。bus lock競合で1 kHz taskを待たせない。
+  spi_config.transaction_timeout = avi::Timeout::noWait();
+
   esp_err_t result = spi_.begin(spi_config);
+  if (result != ESP_OK)
+    return result;
+
+  AS5047D::Config encoder_config{};
+  encoder_config.frequency_hz = board::kEncoderSpiFrequencyHz;
+  result = encoder_.begin(spi_, board::kEncoderCs, encoder_config);
   if (result == ESP_OK) {
-    AS5047D::Config encoder_config{};
-    encoder_config.frequency_hz = board::kEncoderSpiFrequencyHz;
-    result = encoder_.begin(spi_, board::kEncoderCs, encoder_config);
+    AS5047D::Status status{};
+    result = encoder_.getStatus(status);
+    if (result == ESP_OK &&
+        (status.magnetic_too_low || status.magnetic_too_high ||
+         status.cordic_overflow || !status.offset_compensation_finished))
+      result = ESP_ERR_INVALID_RESPONSE;
   }
+  if (result == ESP_OK)
+    result = encoder_.startPipelinedRead();
+
+  if (result != ESP_OK) {
+    if (encoder_.initialized())
+      (void)encoder_.end();
+    if (spi_.initialized())
+      (void)spi_.end();
+  }
+  return result;
+}
+
+esp_err_t FinActuator::initialize() {
+  if (encoder_mutex_ == nullptr)
+    encoder_mutex_ = xSemaphoreCreateMutex();
+  if (encoder_mutex_ == nullptr)
+    return ESP_ERR_NO_MEM;
+
+  esp_err_t result = initializeEncoderTransport();
   if (result == ESP_OK)
     result = initializeMotor();
   if (result != ESP_OK) {
+    encoder_health_.markFailed();
     forceSafe();
     return result;
   }
 
   encoder_tracking_initialized_ = false;
+  encoder_unwrapped_valid_ = false;
   zero_valid_.store(false, std::memory_order_release);
+  encoder_valid_.store(false, std::memory_order_release);
   rate_valid_.store(false, std::memory_order_release);
+  encoder_health_.markHealthy();
   state_.store(FinState::free, std::memory_order_release);
   return coast();
 }
 
 esp_err_t FinActuator::setZero() {
-  if (!encoder_.initialized() || !motor_initialized_ ||
-      !encoder_tracking_initialized_ ||
+  if (!motor_initialized_ || !encoder_tracking_initialized_ ||
       !encoder_valid_.load(std::memory_order_acquire))
     return ESP_ERR_INVALID_STATE;
 
@@ -140,25 +185,43 @@ double FinActuator::zeroHoldTorque(double angle_rad, double rate_rad_s) const {
 }
 
 void FinActuator::update(uint64_t now_us) {
-  if (!encoder_.initialized())
+  if (encoder_mutex_ == nullptr)
+    return;
+
+  // Recovery taskがbegin/end中なら待たず、そのtickを欠測として扱う。
+  if (xSemaphoreTake(encoder_mutex_, 0) != pdTRUE)
     return;
 
   AS5047D::Data data{};
-  const esp_err_t read = encoder_.read(data);
-  if (read != ESP_OK || !std::isfinite(data.angle_radians)) {
+  esp_err_t read_result = ESP_ERR_INVALID_STATE;
+  if (encoder_.initialized() && encoder_.pipelinedReadActive())
+    read_result = encoder_.readPipelined(data);
+  xSemaphoreGive(encoder_mutex_);
+
+  if (read_result != ESP_OK || !std::isfinite(data.angle_radians)) {
     encoder_valid_.store(false, std::memory_order_release);
     rate_valid_.store(false, std::memory_order_release);
+    encoder_health_.markFailure(kEncoderFailureThreshold);
     if (state_.load(std::memory_order_acquire) != FinState::free)
       (void)coast();
     return;
   }
 
+  encoder_health_.markHealthy();
+
   double encoder_delta_rad = 0.0;
   bool rate_valid = false;
   if (!encoder_tracking_initialized_) {
+    if (encoder_unwrapped_valid_) {
+      encoder_unwrapped_rad_ = fin_kinematics::nearestEquivalentAngle(
+          data.angle_radians, encoder_unwrapped_rad_);
+    } else {
+      encoder_unwrapped_rad_ = data.angle_radians;
+      encoder_unwrapped_valid_ = true;
+    }
     encoder_tracking_initialized_ = true;
     previous_encoder_raw_rad_ = data.angle_radians;
-    encoder_unwrapped_rad_ = data.angle_radians;
+    previous_timestamp_us_ = 0;
   } else {
     encoder_delta_rad = fin_kinematics::unwrapEncoderDelta(
         data.angle_radians, previous_encoder_raw_rad_);
@@ -188,12 +251,12 @@ void FinActuator::update(uint64_t now_us) {
   sample_timestamp_us_.store(now_us, std::memory_order_release);
 
   const bool zero_valid = zero_valid_.load(std::memory_order_acquire);
-  const double angle = zero_valid
-                           ? fin_kinematics::encoderToFinRadians(
-                                 encoder_unwrapped_rad_ -
-                                     zero_encoder_unwrapped_rad_,
-                                 flight_config::kTotalGearRatio)
-                           : 0.0;
+  const double angle =
+      zero_valid
+          ? fin_kinematics::encoderToFinRadians(
+                encoder_unwrapped_rad_ - zero_encoder_unwrapped_rad_,
+                flight_config::kTotalGearRatio)
+          : 0.0;
   angle_rad_.store(angle, std::memory_order_release);
 
   if (!zero_valid)
@@ -212,6 +275,42 @@ void FinActuator::update(uint64_t now_us) {
     }
     (void)applyOutputTorque(requested_roll_torque_nm_, angle, effective_rate);
   }
+}
+
+esp_err_t FinActuator::recoverEncoder() {
+  if (!encoderRecoveryRequested())
+    return ESP_OK;
+  if (encoder_mutex_ == nullptr)
+    return ESP_ERR_INVALID_STATE;
+  if (xSemaphoreTake(encoder_mutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+
+  encoder_health_.markRecovering();
+  encoder_valid_.store(false, std::memory_order_release);
+  rate_valid_.store(false, std::memory_order_release);
+  if (state_.load(std::memory_order_acquire) != FinState::free)
+    (void)coast();
+
+  esp_err_t result = initializeEncoderTransport();
+  if (result == ESP_OK && !motor_initialized_)
+    result = initializeMotor();
+
+  if (result == ESP_OK) {
+    // zeroと切断前multi-turn位置は保持し、次sampleを最寄りbranchへ接続する。
+    encoder_tracking_initialized_ = false;
+    previous_timestamp_us_ = 0;
+    rate_rad_s_.store(0.0, std::memory_order_release);
+    // 最初のvalid sampleが来るまではRecoveringのままとする。
+  } else {
+    encoder_health_.markFailed();
+  }
+
+  xSemaphoreGive(encoder_mutex_);
+  return result;
+}
+
+bool FinActuator::encoderRecoveryRequested() const {
+  return encoder_health_.recoveryRequested();
 }
 
 esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
@@ -293,6 +392,7 @@ void FinActuator::forceSafe() {
   requested_roll_torque_nm_ = 0.0;
   state_.store(FinState::free, std::memory_order_release);
   zero_valid_.store(false, std::memory_order_release);
+  encoder_valid_.store(false, std::memory_order_release);
   rate_valid_.store(false, std::memory_order_release);
   (void)coast();
 }
@@ -300,6 +400,7 @@ void FinActuator::forceSafe() {
 FinTelemetry FinActuator::telemetry() const {
   FinTelemetry result{};
   result.state = state_.load(std::memory_order_acquire);
+  result.encoder_state = encoder_health_.state();
   result.encoder_valid = encoder_valid_.load(std::memory_order_acquire);
   result.rate_valid = rate_valid_.load(std::memory_order_acquire);
   result.zero_valid = zero_valid_.load(std::memory_order_acquire);

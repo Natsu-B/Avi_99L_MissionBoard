@@ -6,12 +6,17 @@
 
 #include "actuators/safe_outputs.hpp"
 #include "config/board.hpp"
+#include "esp_timer.h"
 #include "freertos/task.h"
 #include "protocol/wire.hpp"
 
 namespace runtime {
 namespace {
+
 constexpr uint32_t kTaskStackWords = 6144;
+constexpr uint32_t kRecoveryTaskStackWords = 4096;
+constexpr UBaseType_t kRecoveryTaskPriority = 8;
+
 } // namespace
 
 void Runtime::resetControlSession() {
@@ -27,8 +32,9 @@ esp_err_t Runtime::start() {
   fin_command_queue_ = xQueueCreate(4, sizeof(ActuatorCommand));
   para_command_queue_ = xQueueCreate(4, sizeof(ActuatorCommand));
   result_queue_ = xQueueCreate(16, sizeof(protocol::CommandResult));
+  imu_mutex_ = xSemaphoreCreateMutex();
   if (fin_command_queue_ == nullptr || para_command_queue_ == nullptr ||
-      result_queue_ == nullptr)
+      result_queue_ == nullptr || imu_mutex_ == nullptr)
     return ESP_ERR_NO_MEM;
 
   const esp_err_t log = logger_.prepare();
@@ -40,12 +46,15 @@ esp_err_t Runtime::start() {
     std::printf("fin init failed: %s\n", esp_err_to_name(fin));
 
   (void)actuators::safe_outputs::setAux5v(true);
+
   const esp_err_t imu = initializeImu();
   if (imu != ESP_OK)
     std::printf("imu init failed: %s\n", esp_err_to_name(imu));
+
   const esp_err_t air = initializeAirData();
   if (air != ESP_OK)
     std::printf("air data init failed: %s\n", esp_err_to_name(air));
+
   const esp_err_t can = initializeCan();
   if (can != ESP_OK)
     std::printf("can init failed: %s\n", esp_err_to_name(can));
@@ -59,26 +68,42 @@ esp_err_t Runtime::start() {
       xTaskCreate(airTaskEntry, "AirData", kTaskStackWords, this, 18,
                   nullptr) != pdPASS ||
       xTaskCreate(canTaskEntry, "CAN", kTaskStackWords, this, 16,
-                  nullptr) != pdPASS)
+                  nullptr) != pdPASS ||
+      xTaskCreate(recoveryTaskEntry, "Recovery", kRecoveryTaskStackWords, this,
+                  kRecoveryTaskPriority, nullptr) != pdPASS)
     return ESP_ERR_NO_MEM;
 
   return ESP_OK;
 }
 
 esp_err_t Runtime::initializeImu() {
-  if (imu_.initialized())
+  if (imu_.initialized()) {
+    imu_health_.markHealthy();
     return ESP_OK;
-  if (imu_spi_.initialized())
-    (void)imu_spi_.end();
+  }
+
+  if (imu_spi_.initialized()) {
+    const esp_err_t end_result = imu_spi_.end();
+    if (end_result != ESP_OK) {
+      imu_health_.markFailed();
+      return end_result;
+    }
+  }
+
   SPICREATE::Config spi{};
   spi.host = board::kImuSpiHost;
   spi.sck = board::kImuSclk;
   spi.miso = board::kImuMiso;
   spi.mosi = board::kImuMosi;
-  spi.transaction_timeout = avi::Timeout::milliseconds(2);
+  // SPI3はICM42688専用。Recoveryとのmutex競合で1 kHz taskを待たせない。
+  spi.transaction_timeout = avi::Timeout::noWait();
+
   esp_err_t result = imu_spi_.begin(spi);
-  if (result != ESP_OK)
+  if (result != ESP_OK) {
+    imu_health_.markFailed();
     return result;
+  }
+
   ICM42688::Config config{};
   config.frequency_hz = board::kImuSpiFrequencyHz;
   config.accel_range = ICM42688::AccelRange::g16;
@@ -87,7 +112,43 @@ esp_err_t Runtime::initializeImu() {
   config.gyro_odr = ICM42688::GyroOdr::hz1000;
   config.filter = ICM42688::Filter::odr_div4;
   config.int_gpio = board::kImuInterrupt;
-  return imu_.begin(imu_spi_, board::kImuCs, config);
+
+  result = imu_.begin(imu_spi_, board::kImuCs, config);
+  if (result != ESP_OK) {
+    if (imu_spi_.initialized())
+      (void)imu_spi_.end();
+    imu_health_.markFailed();
+    return result;
+  }
+
+  imu_health_.markHealthy();
+  return ESP_OK;
+}
+
+esp_err_t Runtime::recoverImu() {
+  if (!imu_health_.recoveryRequested())
+    return ESP_OK;
+  if (imu_mutex_ == nullptr)
+    return ESP_ERR_INVALID_STATE;
+  if (xSemaphoreTake(imu_mutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+
+  imu_health_.markRecovering();
+  imu_valid_.store(false, std::memory_order_release);
+
+  esp_err_t result = ESP_OK;
+  if (imu_.initialized())
+    result = imu_.end();
+  if (result == ESP_OK && imu_spi_.initialized())
+    result = imu_spi_.end();
+  if (result == ESP_OK)
+    result = initializeImu();
+
+  if (result != ESP_OK)
+    imu_health_.markFailed();
+
+  xSemaphoreGive(imu_mutex_);
+  return result;
 }
 
 esp_err_t Runtime::initializeAirData() {
@@ -99,8 +160,13 @@ esp_err_t Runtime::initializeAirData() {
     config.frequency_hz = board::kAirDataI2cFrequencyHz;
     config.operation_timeout = avi::Timeout::milliseconds(10);
     const esp_err_t bus_result = air_i2c_.begin(config);
-    if (bus_result != ESP_OK)
+    if (bus_result != ESP_OK) {
+      if (!lps_.initialized())
+        lps_health_.markFailed();
+      if (!ssc_.initialized())
+        ssc_health_.markFailed();
       return bus_result;
+    }
   }
 
   esp_err_t lps_result = ESP_OK;
@@ -109,17 +175,28 @@ esp_err_t Runtime::initializeAirData() {
     lps_config.odr = LPS25HB::Odr::hz25;
     lps_config.pressure_average = LPS25HB::PressureAverage::samples8;
     lps_config.temperature_average = LPS25HB::TemperatureAverage::samples8;
+
     if (air_i2c_.probe(0x5C) == ESP_OK)
       lps_result = lps_.begin(air_i2c_, LPS25HB::Address::low, lps_config);
     else if (air_i2c_.probe(0x5D) == ESP_OK)
       lps_result = lps_.begin(air_i2c_, LPS25HB::Address::high, lps_config);
     else
       lps_result = ESP_ERR_NOT_FOUND;
+
+    if (lps_result == ESP_OK)
+      lps_health_.markHealthy();
+    else
+      lps_health_.markFailed();
   }
 
   esp_err_t ssc_result = ESP_OK;
-  if (!ssc_.initialized())
+  if (!ssc_.initialized()) {
     ssc_result = ssc_.begin(air_i2c_);
+    if (ssc_result == ESP_OK)
+      ssc_health_.markHealthy();
+    else
+      ssc_health_.markFailed();
+  }
 
   if (lps_.initialized() || ssc_.initialized())
     return ESP_OK;
@@ -153,12 +230,14 @@ void Runtime::paraTaskEntry(void *context) {
 void Runtime::canTaskEntry(void *context) {
   static_cast<Runtime *>(context)->canTask();
 }
+void Runtime::recoveryTaskEntry(void *context) {
+  static_cast<Runtime *>(context)->recoveryTask();
+}
 
 void Runtime::pushResult(const protocol::CommandResult &result) {
   if (result_queue_ != nullptr)
     (void)xQueueSend(result_queue_, &result, 0);
 }
-
 
 protocol::WireMissionState Runtime::wireState() const {
   switch (state_.snapshot().phase) {
@@ -176,7 +255,6 @@ protocol::WireMissionState Runtime::wireState() const {
   return protocol::WireMissionState::command_receive;
 }
 
-
 void Runtime::sendCanFrame(const protocol::CanFrame &input) {
   CANCREATE::Frame frame{};
   frame.identifier = input.identifier;
@@ -187,5 +265,44 @@ void Runtime::sendCanFrame(const protocol::CanFrame &input) {
   (void)can_.write(frame, avi::Timeout::milliseconds(2));
 }
 
+void Runtime::recoveryTask() {
+  TickType_t wake = xTaskGetTickCount();
+  uint64_t next_imu_retry = 0;
+  uint64_t next_encoder_retry = 0;
+
+  for (;;) {
+    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+    const auto snapshot = state_.snapshot();
+
+    // 回収clockやPara taskの前提条件にはせず、低優先度best-effortで復旧する。
+    if (!snapshot.power_cutoff && imu_health_.recoveryRequested()) {
+      if (next_imu_retry == 0) {
+        next_imu_retry = now + 1'000'000ULL;
+      } else if (now >= next_imu_retry) {
+        const esp_err_t result = recoverImu();
+        next_imu_retry = now + 1'000'000ULL;
+        if (result != ESP_OK)
+          std::printf("imu recovery failed: %s\n", esp_err_to_name(result));
+      }
+    } else {
+      next_imu_retry = 0;
+    }
+
+    if (!snapshot.power_cutoff && fin_.encoderRecoveryRequested()) {
+      if (next_encoder_retry == 0) {
+        next_encoder_retry = now + 1'000'000ULL;
+      } else if (now >= next_encoder_retry) {
+        const esp_err_t result = fin_.recoverEncoder();
+        next_encoder_retry = now + 1'000'000ULL;
+        if (result != ESP_OK)
+          std::printf("encoder recovery failed: %s\n", esp_err_to_name(result));
+      }
+    } else {
+      next_encoder_retry = 0;
+    }
+
+    vTaskDelayUntil(&wake, pdMS_TO_TICKS(20));
+  }
+}
 
 } // namespace runtime

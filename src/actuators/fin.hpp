@@ -5,7 +5,10 @@
 
 #include "AS5047D.h"
 #include "SPICREATE.h"
+#include "diagnostics/device_health.hpp"
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 namespace actuators {
 
@@ -13,6 +16,8 @@ enum class FinState : uint8_t { unavailable, free, zero_hold, roll_control };
 
 struct FinTelemetry {
   FinState state{FinState::unavailable};
+  diagnostics::DeviceState encoder_state{
+      diagnostics::DeviceState::unavailable};
   bool encoder_valid{};
   bool rate_valid{};
   bool zero_valid{};
@@ -40,9 +45,12 @@ public:
   void update(uint64_t now_us);
   void forceSafe();
 
+  [[nodiscard]] bool encoderRecoveryRequested() const;
+  [[nodiscard]] esp_err_t recoverEncoder();
   [[nodiscard]] FinTelemetry telemetry() const;
 
 private:
+  [[nodiscard]] esp_err_t initializeEncoderTransport();
   [[nodiscard]] esp_err_t initializeMotor();
   [[nodiscard]] esp_err_t drive(double duty_signed);
   [[nodiscard]] esp_err_t coast();
@@ -54,9 +62,11 @@ private:
 
   SPICREATE spi_{};
   AS5047D encoder_{};
+  SemaphoreHandle_t encoder_mutex_{};
   bool motor_initialized_{};
 
   std::atomic<FinState> state_{FinState::unavailable};
+  diagnostics::DeviceHealth encoder_health_{};
   std::atomic<bool> encoder_valid_{};
   std::atomic<bool> rate_valid_{};
   std::atomic<bool> zero_valid_{};
@@ -66,6 +76,7 @@ private:
 
   // AS5047Dは1回転絶対角しか返さないため、multi-turn位置はRAM上でunwrapする。
   bool encoder_tracking_initialized_{};
+  bool encoder_unwrapped_valid_{};
   double previous_encoder_raw_rad_{};
   double encoder_unwrapped_rad_{};
   double zero_encoder_unwrapped_rad_{};

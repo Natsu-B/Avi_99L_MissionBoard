@@ -14,6 +14,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegToRad = kPi / 180.0;
+constexpr uint8_t kImuFailureThreshold = 3U;
 
 protocol::CommandReason reasonForEsp(esp_err_t result) {
   if (result == ESP_OK)
@@ -69,7 +70,6 @@ void Runtime::safetyTask() {
 void Runtime::realtimeTask() {
   TickType_t wake = xTaskGetTickCount();
   mission::Phase previous_phase = mission::Phase::command_receive;
-  uint64_t next_imu_retry = 0;
   bool local_logger_finished = false;
 
   for (;;) {
@@ -79,6 +79,7 @@ void Runtime::realtimeTask() {
     if (snapshot.phase != previous_phase) {
       if (snapshot.phase == mission::Phase::liftoff_detection) {
         imu_liftoff_.reset();
+        imu_liftoff_detected_.store(false, std::memory_order_release);
         resetControlSession();
         if (fin_.telemetry().zero_valid)
           (void)fin_.zeroHold();
@@ -101,32 +102,42 @@ void Runtime::realtimeTask() {
 
     ICM42688::Data imu_data{};
     bool imu_sample_valid = false;
+    bool imu_read_attempted = false;
     double corrected_roll_rate_dps = 0.0;
-    if (!imu_.initialized() && now >= next_imu_retry) {
-      const esp_err_t result = initializeImu();
-      next_imu_retry = now + 1'000'000ULL;
-      if (result != ESP_OK)
-        imu_valid_.store(false, std::memory_order_release);
+
+    // Recovery taskがICMをbegin/end中なら待たず、このtickだけ欠測にする。
+    if (imu_mutex_ != nullptr && xSemaphoreTake(imu_mutex_, 0) == pdTRUE) {
+      if (imu_.initialized()) {
+        imu_read_attempted = true;
+        if (imu_.read(imu_data) == ESP_OK) {
+          imu_sample_valid =
+              std::isfinite(imu_data.acceleration_g[0]) &&
+              std::isfinite(imu_data.acceleration_g[1]) &&
+              std::isfinite(imu_data.acceleration_g[2]) &&
+              std::isfinite(imu_data.angular_velocity_dps[2]);
+          if (imu_sample_valid) {
+            corrected_roll_rate_dps =
+                -imu_data.angular_velocity_dps[2] -
+                flight_config::kGyroRollBiasDps;
+            imu_sample_valid = std::isfinite(corrected_roll_rate_dps);
+          }
+        }
+      } else {
+        imu_health_.markFailed();
+      }
+      xSemaphoreGive(imu_mutex_);
     }
-    if (imu_.initialized() && imu_.read(imu_data) == ESP_OK) {
-      imu_sample_valid = std::isfinite(imu_data.acceleration_g[0]) &&
-                         std::isfinite(imu_data.acceleration_g[1]) &&
-                         std::isfinite(imu_data.acceleration_g[2]) &&
-                         std::isfinite(imu_data.angular_velocity_dps[2]);
-      if (imu_sample_valid) {
-        corrected_roll_rate_dps =
-            -imu_data.angular_velocity_dps[2] -
-            flight_config::kGyroRollBiasDps;
-        imu_sample_valid = std::isfinite(corrected_roll_rate_dps);
-      }
-      imu_valid_.store(imu_sample_valid, std::memory_order_release);
-      if (imu_sample_valid) {
-        gyro_roll_rate_dps_.store(corrected_roll_rate_dps,
-                                  std::memory_order_release);
-        imu_sample_us_.store(now, std::memory_order_release);
-      }
+
+    if (imu_sample_valid) {
+      imu_health_.markHealthy();
+      imu_valid_.store(true, std::memory_order_release);
+      gyro_roll_rate_dps_.store(corrected_roll_rate_dps,
+                                std::memory_order_release);
+      imu_sample_us_.store(now, std::memory_order_release);
     } else {
       imu_valid_.store(false, std::memory_order_release);
+      if (imu_read_attempted)
+        imu_health_.markFailure(kImuFailureThreshold);
     }
 
     if (snapshot.phase == mission::Phase::liftoff_detection &&
@@ -138,6 +149,7 @@ void Runtime::realtimeTask() {
       if (imu_liftoff_.update(imu_data.acceleration_g[0],
                               imu_data.acceleration_g[1],
                               imu_data.acceleration_g[2], true)) {
+        imu_liftoff_detected_.store(true, std::memory_order_release);
         if (state_.reportLiftoff(now)) {
           snapshot = state_.snapshot();
           if (logger_.startFlight(snapshot.generation) == ESP_OK) {
@@ -213,6 +225,11 @@ void Runtime::realtimeTask() {
             fin_telemetry.zero_valid &&
             fresh(fin_telemetry.sample_timestamp_us, now,
                   flight_config::kFinFreshUs);
+
+        // Roll Control開始後のAS5047D喪失は同一flightで再entryさせない。
+        if (control_session_.referenceStarted() && !fin_fresh)
+          control_session_.disablePermanently();
+
         const bool lps_fresh =
             lps_valid_.load(std::memory_order_acquire) &&
             fresh(lps_sample_us_.load(std::memory_order_acquire), now,
