@@ -99,10 +99,10 @@ reset後はRollControlへ復帰しない。
 - 想定最大Fin速度・sample gapで隣接valid sampleのencoder回転が180度を超えず、周回誤認しないこと
 - reboot後にzeroが無効化され、古い周回数を再利用しないこと
 - motor正負極性
-- ZeroHold Kp/Kd
+- 本番固定ZeroHold値がbuildへ入っていること
 - motor電気定数
 - 最大current/duty
-- encoder fault時に安全側へ移ること
+- encoder/rate invalid時にmotorがHi-Zへ移ること
 
 ### Para
 

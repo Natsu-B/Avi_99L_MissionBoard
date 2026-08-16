@@ -41,6 +41,20 @@ Fin zeroはNVSへ保存しません。再起動後はencoderの周回数を復�
 
 +17秒fallbackと+25秒cutoffはCAN、SSC、LPS、SDの処理結果を待ちません。
 
+## ZeroHold
+
+本飛行ではSpicaのfin装着characterizationを固定値として採用します。
+
+- `Kp = 65.390941574 N m/rad`
+- `Kd = 3.269547079 N m s/rad`
+- requested torque limit `= 0.80 N m`
+- rate continuous dead-zone `= 1.0 deg/s`
+- requested-torque dead-zone/hysteresis `= none`
+
+演算順序はSpicaの`mission_zero_hold_step`と同じく、angle/rateへcontinuous dead-zoneを適用してPD要求torqueを計算し、最後に`±0.80 N m`へclampします。AS5047D angleまたはFin rateがinvalidなtickではZeroHold出力を生成せずmotorをHi-Zへ落とし、validなrateが復帰したtickから保持を再開します。
+
+Kp/Kdはfin装着command-domain実測を既存TorqueMapperへ換算した値です。fin装着試験ではactual current/torqueを直接計測していないため、この区別は残しますが、firmware上は本飛行の固定値として扱います。
+
 ## RollControl
 
 RollControl本体は`Flight`内部の出力modeとして実装しています。
@@ -59,7 +73,7 @@ Fin angle/rateはAS5047D encoder軸のwrapped angle/rateではなく、連続unw
 
 SSCは同じAirData I2C busで取得し、固定zero offset、moving average、LPS静圧、SSC温度からSaint-Venant式でairspeedを計算します。runtime calibration/NVSは使用しません。
 
-**Roll gain、gyro bias、SSC zero、motor/ZeroHold定数は最終flight値ではありません。** `src/config/flight.hpp`の`TODO(SIMULATION)` / `TODO(HW_TEST)`を飛行前に確定してください。
+**ZeroHold定数は本飛行固定値です。Roll gain、gyro bias、SSC zeroはまだ別途確定対象です。** 固定値は`src/config/flight.hpp`で管理します。
 
 ## Logging
 
@@ -100,7 +114,7 @@ ctest --test-dir host_test/build --output-on-failure
 - SpicaでRollControl gain / authorityを確定
 - 実機でgyro bias / SSC zeroを確定
 - AS5047Dの連続unwrapが実機最大Fin速度・想定sample gapで周回誤認しないことを確認
-- Fin motor極性・電気定数・ZeroHold gainを実機確認
+- Fin motor極性・電気定数が実機と固定configで一致することを確認
 - Para ±130 deg、Hold、2 s timeoutを実機確認
 - flight中reset時のPara timer復元
 - CAN/LPS/SSC/SD fault injection下で+17/+25秒Safety pathを実機確認

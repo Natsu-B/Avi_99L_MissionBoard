@@ -7,6 +7,7 @@
 #include "actuators/safe_outputs.hpp"
 #include "config/board.hpp"
 #include "config/flight.hpp"
+#include "control/zero_hold.hpp"
 #include "driver/ledc.h"
 
 namespace actuators {
@@ -145,13 +146,12 @@ esp_err_t FinActuator::zeroHold() {
 
   state_.store(FinState::zero_hold, std::memory_order_release);
   requested_roll_torque_nm_ = 0.0;
-  if (!encoder_valid_.load(std::memory_order_acquire))
+  if (!encoder_valid_.load(std::memory_order_acquire) ||
+      !rate_valid_.load(std::memory_order_acquire))
     return coast();
 
   const double angle = angle_rad_.load(std::memory_order_acquire);
-  const double rate = rate_valid_.load(std::memory_order_acquire)
-                          ? rate_rad_s_.load(std::memory_order_acquire)
-                          : 0.0;
+  const double rate = rate_rad_s_.load(std::memory_order_acquire);
   return applyOutputTorque(zeroHoldTorque(angle, rate), angle, rate);
 }
 
@@ -178,10 +178,15 @@ esp_err_t FinActuator::free() {
 }
 
 double FinActuator::zeroHoldTorque(double angle_rad, double rate_rad_s) const {
-  double torque = -flight_config::kFinZeroHoldKpNmPerRad * angle_rad -
-                  flight_config::kFinZeroHoldKdNmPerRadS * rate_rad_s;
-  return std::clamp(torque, -flight_config::kFinZeroHoldTorqueLimitNm,
-                    flight_config::kFinZeroHoldTorqueLimitNm);
+  const control::ZeroHoldConfig config{
+      flight_config::kFinZeroHoldKpNmPerRad,
+      flight_config::kFinZeroHoldKdNmPerRadS,
+      flight_config::kFinZeroHoldTorqueLimitNm,
+      0.0,
+      flight_config::kFinZeroHoldRateDeadZoneDegS * kDegToRad};
+  const auto output =
+      control::computeZeroHold({angle_rad, rate_rad_s}, config);
+  return output.valid ? output.torque_nm : 0.0;
 }
 
 void FinActuator::update(uint64_t now_us) {
@@ -263,17 +268,20 @@ void FinActuator::update(uint64_t now_us) {
     return;
 
   const FinState state = state_.load(std::memory_order_acquire);
-  const double effective_rate =
-      rate_valid ? rate_rad_s_.load(std::memory_order_acquire) : 0.0;
   if (state == FinState::zero_hold) {
-    (void)applyOutputTorque(zeroHoldTorque(angle, effective_rate), angle,
-                            effective_rate);
+    if (!rate_valid) {
+      (void)coast();
+      return;
+    }
+    const double rate = rate_rad_s_.load(std::memory_order_acquire);
+    (void)applyOutputTorque(zeroHoldTorque(angle, rate), angle, rate);
   } else if (state == FinState::roll_control) {
     if (!rate_valid) {
       (void)coast();
       return;
     }
-    (void)applyOutputTorque(requested_roll_torque_nm_, angle, effective_rate);
+    const double rate = rate_rad_s_.load(std::memory_order_acquire);
+    (void)applyOutputTorque(requested_roll_torque_nm_, angle, rate);
   }
 }
 

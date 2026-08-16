@@ -8,6 +8,7 @@ add_executable(minimal_tests
   ../src/protocol/wire.cpp
   ../src/protocol/command_cache.cpp
   ../src/control/roll_control.cpp
+  ../src/control/zero_hold.cpp
   ../src/sensors/airspeed.cpp
 )
 target_include_directories(minimal_tests PRIVATE ../src)

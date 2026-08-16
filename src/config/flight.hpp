@@ -24,18 +24,22 @@ constexpr uint32_t kParaPowerStabilizationMs = 100;
 constexpr uint32_t kParaMotionTimeoutMs = 2'000;
 constexpr uint32_t kParaReconnectMs = 1'000;
 
-// 動翼ZeroHoldの暫定係数。旧MissionBoardで使用していた係数を1モーター用に流用する。
-// TODO(HW_TEST): 実機で確認し、必要なら置換する。
-constexpr double kFinZeroHoldKpNmPerRad = 2.32;
-constexpr double kFinZeroHoldKdNmPerRadS = 0.296;
+// Spicaのfin装着characterizationを本飛行のZeroHold固定値として採用する。
+// Kp/Kdはcommand-domain実測を既存TorqueMapperへ換算した値であり、
+// requested torqueそのものを直接計測した値ではない。
+constexpr double kFinZeroHoldKpNmPerRad = 65.390941574;
+constexpr double kFinZeroHoldKdNmPerRadS = 3.269547079;
 constexpr double kFinZeroHoldTorqueLimitNm = 0.80;
+// Spica revision 3選択variantと同じcontinuous rate dead-zoneを使用する。
+constexpr double kFinZeroHoldRateDeadZoneDegS = 1.0;
 constexpr double kMotorResistanceOhm = 3.48;
 constexpr double kMotorTorqueConstantNmPerA = 0.00855;
 constexpr double kMotorSpeedConstantRpmPerV = 1120.0;
 constexpr double kTotalGearRatio = 176.175;
 constexpr double kDrivetrainEfficiency = 0.60;
 constexpr double kMotorBusVoltageV = 9.0;
-constexpr double kMotorMaxCurrentA = 2.0;
+// TB67の実装上のhardware current settingに合わせる。
+constexpr double kMotorMaxCurrentA = 2.2;
 constexpr double kMotorMaximumDuty = 1.0;
 constexpr bool kPositiveTorqueUsesIn1 = true;
 constexpr double kFinOutwardCommandLimitDeg = 15.0;

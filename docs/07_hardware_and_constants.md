@@ -133,28 +133,34 @@ Open負方向を「反時計回り」、Close正方向を「時計回り」と�
 
 ## 5. Fin ZeroHold constants
 
-現実装は旧候補値を1 motor用へ流用している。
+本飛行ではSpica `f7c477bff52c5a404ba25f7adbbe92aac68c819a`で記録されたfin装着characterizationの換算値をZeroHold固定値として採用する。Spica artifact上の`production_selectable=false`は元解析時点のstatusだが、本Mission firmwareでは運用判断によりflight-fixedとして扱う。
+
+制御構造はSpica revision 3のselected variantに合わせ、angle dead-zoneなし、rate continuous dead-zone 1.0 deg/s、requested-torque dead-zone/hysteresisなし、最後に要求torqueを±0.80 N mへclampする。
 
 | item | value | status |
 |---|---:|---|
-| Kp | 2.32 N m/rad | TODO(HW_TEST) |
-| Kd | 0.296 N m/(rad/s) | TODO(HW_TEST) |
-| torque limit | 0.80 N m | TODO(HW_TEST) |
-| motor resistance | 3.48 ohm | TODO(HW_TEST) |
-| torque constant | 0.00855 N m/A | TODO(HW_TEST) |
-| speed constant | 1120 rpm/V | TODO(HW_TEST) |
-| gear ratio | 176.175 | 機構確認 |
-| drivetrain efficiency | 0.60 | 暫定 |
-| bus voltage | 9.0 V | 暫定 |
-| max current | 2.0 A | TODO(HW_TEST) |
-| PWM max duty | 1.0 | TODO(HW_TEST) |
-| positive torque polarity | IN1 | TODO(HW_TEST) |
+| Kp | 65.390941574 N m/rad | 本飛行固定 |
+| Kd | 3.269547079 N m/(rad/s) | 本飛行固定 |
+| rate continuous dead-zone | 1.0 deg/s | 本飛行固定 |
+| requested torque limit | 0.80 N m | 本飛行固定 |
+| requested torque conditioner | none | 本飛行固定 |
+| motor resistance | 3.48 ohm | TorqueMapper固定値 |
+| torque constant | 0.00855 N m/A | TorqueMapper固定値 |
+| speed constant | 1120 rpm/V | TorqueMapper固定値 |
+| gear ratio | 176.175 | 機構固定値 |
+| drivetrain efficiency | 0.60 | TorqueMapper換算仮定 |
+| bus voltage | 9.0 V | fin装着換算条件 |
+| max current | 2.2 A | TB67 hardware setting |
+| PWM max duty | 1.0 | software上限 |
+| positive torque polarity | IN1 | 実機方向確認対象 |
 
 `gear ratio = 176.175`はencoder/motor側角度をFin出力軸角へ変換するために使用する。ZeroHold/RollControlへ渡すFin angle/rateはgear ratio変換後の値とする。
 
-これらをruntime commandやNVSで変更する仕組みは設けない。
+Spicaのfin装着characterizationはcommand-domainの応答を実測しており、上表Kp/KdのN m換算には既存TorqueMapperを使用している。actual motor current、actual shaft torque、Vbusはそのcaptureで直接計測していない。この測定上の区別は残すが、runtime command/NVSから値を変更する仕組みは設けない。
 
-実機characterization後にsource constantを更新する。
+AS5047D angleまたはFin rateがinvalidなtickではZeroHold要求torqueを生成せず、motorをHi-Zとする。従来のようにrate invalidを0 rad/sへ置換してP項だけで保持しない。
+
+±15 degの外向きcommand禁止はZeroHold gain変更後も維持する。
 
 ## 6. Logging constants
 

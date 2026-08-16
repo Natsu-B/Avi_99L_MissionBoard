@@ -1,9 +1,11 @@
 #include <cassert>
 #include <cmath>
+#include <limits>
 
 #include "actuators/fin_kinematics.hpp"
 #include "config/flight.hpp"
 #include "control/roll_control.hpp"
+#include "control/zero_hold.hpp"
 #include "mission/flight_detectors.hpp"
 #include "mission/state_machine.hpp"
 #include "protocol/command_cache.hpp"
@@ -172,6 +174,53 @@ int main() {
       controller.compute({1.0, 0.0, 0.0, 0.0, 100.0});
   assert(control_output.valid);
   assert(std::abs(control_output.torque_nm + 0.08) < 1.0e-12);
+
+  // 本番ZeroHold定数とSpicaのcontinuous rate dead-zoneを固定する。
+  assert(std::abs(flight_config::kFinZeroHoldKpNmPerRad - 65.390941574) <
+         1.0e-12);
+  assert(std::abs(flight_config::kFinZeroHoldKdNmPerRadS - 3.269547079) <
+         1.0e-12);
+  assert(std::abs(flight_config::kFinZeroHoldTorqueLimitNm - 0.80) < 1.0e-12);
+  assert(std::abs(flight_config::kFinZeroHoldRateDeadZoneDegS - 1.0) <
+         1.0e-12);
+  assert(std::abs(flight_config::kMotorMaxCurrentA - 2.2) < 1.0e-12);
+
+  const control::ZeroHoldConfig zero_hold_config{
+      flight_config::kFinZeroHoldKpNmPerRad,
+      flight_config::kFinZeroHoldKdNmPerRadS,
+      flight_config::kFinZeroHoldTorqueLimitNm,
+      0.0,
+      flight_config::kFinZeroHoldRateDeadZoneDegS * kDegToRad};
+
+  const auto below_rate_dead_zone = control::computeZeroHold(
+      {0.1 * kDegToRad, 0.5 * kDegToRad}, zero_hold_config);
+  const double angle_only_expected =
+      -flight_config::kFinZeroHoldKpNmPerRad * 0.1 * kDegToRad;
+  assert(below_rate_dead_zone.valid);
+  assert(!below_rate_dead_zone.saturated);
+  assert(std::abs(below_rate_dead_zone.raw_torque_nm - angle_only_expected) <
+         1.0e-12);
+
+  const auto above_rate_dead_zone = control::computeZeroHold(
+      {0.1 * kDegToRad, 2.0 * kDegToRad}, zero_hold_config);
+  const double continuous_dead_zone_expected =
+      angle_only_expected - flight_config::kFinZeroHoldKdNmPerRadS *
+                                1.0 * kDegToRad;
+  assert(above_rate_dead_zone.valid);
+  assert(!above_rate_dead_zone.saturated);
+  assert(std::abs(above_rate_dead_zone.raw_torque_nm -
+                  continuous_dead_zone_expected) <
+         1.0e-12);
+
+  const auto saturated_zero_hold =
+      control::computeZeroHold({5.0 * kDegToRad, 0.0}, zero_hold_config);
+  assert(saturated_zero_hold.valid);
+  assert(saturated_zero_hold.saturated);
+  assert(std::abs(saturated_zero_hold.torque_nm + 0.80) < 1.0e-12);
+
+  const auto invalid_zero_hold = control::computeZeroHold(
+      {std::numeric_limits<double>::quiet_NaN(), 0.0}, zero_hold_config);
+  assert(!invalid_zero_hold.valid);
 
   // SSC差圧filterはcompile-time zeroを引き、負圧許容範囲内を0へclipする。
   sensors::DifferentialPressureFilter dp_filter{10.0, 5.0, 4};
