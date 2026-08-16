@@ -2,6 +2,22 @@
 
 99L用Mission Board firmwareの最小実装です。旧MissionBoardの巨大なproduction runtimeを移植せず、飛行に必要な経路を小さいstate machineから作り直しています。
 
+## 仕様文書
+
+実装・今後追加するControl・Safetyの基準仕様は[`docs/README.md`](docs/README.md)から参照できます。
+
+主な文書:
+
+- [`docs/00_architecture.md`](docs/00_architecture.md): 全体設計と責務分離
+- [`docs/01_state_machine.md`](docs/01_state_machine.md): 4-state Mission phase
+- [`docs/02_commands_and_actuators.md`](docs/02_commands_and_actuators.md): Fin/Para command
+- [`docs/03_flight_sequence.md`](docs/03_flight_sequence.md): 離床から開傘・cutoffまで
+- [`docs/04_control_spec.md`](docs/04_control_spec.md): +8秒以降のRollControl仕様
+- [`docs/05_logging_and_storage.md`](docs/05_logging_and_storage.md): PSRAM -> SD logging
+- [`docs/06_protocol_compatibility.md`](docs/06_protocol_compatibility.md): 通信基板・地上側との互換方針
+- [`docs/07_hardware_and_constants.md`](docs/07_hardware_and_constants.md): ESP32-S3、pin、定数
+- [`docs/08_safety_reset_and_open_items.md`](docs/08_safety_reset_and_open_items.md): Safety、reset、未決事項
+
 ## 現在の内部state
 
 - `CommandReceive`
@@ -50,7 +66,7 @@ flight log producerは1 kHzです。SDへ直接書かず、まずPSRAM ring buff
 
 ## ESP Libs
 
-`Avi_ESP_Libs`は現在のrefactor branchで確認した次のrevisionを使用します。
+`Avi_ESP_Libs`は現在の実装で次のrevisionを使用します。
 
 `122b4bebdfc89eaef364ff59b3bcd18010f83d5e`
 
@@ -70,4 +86,4 @@ ctest --test-dir host_test/build --output-on-failure
 
 ## 次段で追加するもの
 
-RollControlとSSC airspeedを`Flight` state内部の出力modeとして追加します。MissionStateは増やしません。制御開始時点をroll基準0とし、必要sensorが一時的に欠けた場合はZeroHold、validな対気速度が60 m/s以下になった場合はそのflightでRollControlを永久停止する方針です。
+RollControlとSSC airspeedを`Flight` state内部の出力modeとして追加します。MissionStateは増やしません。制御開始時点をroll基準0とし、必要sensorが一時的に欠けた場合はZeroHold、validな対気速度が60 m/s以下になった場合はそのflightでRollControlを永久停止します。
