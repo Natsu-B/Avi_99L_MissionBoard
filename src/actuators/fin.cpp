@@ -25,6 +25,37 @@ constexpr ledc_timer_bit_t kDutyResolution = LEDC_TIMER_10_BIT;
 constexpr uint32_t kMaximumDutyCount = (1U << 10U) - 1U;
 constexpr uint8_t kEncoderFailureThreshold = 3U;
 
+// Roll ControlのNm->電圧mapperは平均motor端子電圧を指令しているため、
+// PWM OFF相をHi-ZではなくIN1=IN2=Hのshort brakeとする。
+// 両channelは同一timer/hpoint=0なので、held-high側と相手側PWMの重なりが
+// brake相になり、残りがdrive相になる。
+esp_err_t driveBrakePwm(double duty_signed) {
+  if (!std::isfinite(duty_signed))
+    return ESP_ERR_INVALID_ARG;
+
+  const double magnitude = std::clamp(std::abs(duty_signed), 0.0, 1.0);
+  const uint32_t brake_count = static_cast<uint32_t>(std::lround(
+      (1.0 - magnitude) * static_cast<double>(kMaximumDutyCount)));
+
+  // 正dutyではIN1をほぼ常時H、負dutyではIN2をほぼ常時Hにする。
+  // direction反転時は新しいheld-high側を先にHへ上げ、short brakeを経由して
+  // から反対側のdutyを下げる。逆方向driveへの直接遷移を避ける。
+  const ledc_channel_t held_high =
+      duty_signed >= 0.0 ? kIn1Channel : kIn2Channel;
+  const ledc_channel_t brake_pwm =
+      duty_signed >= 0.0 ? kIn2Channel : kIn1Channel;
+
+  esp_err_t result =
+      ledc_set_duty(kLedcMode, held_high, kMaximumDutyCount);
+  if (result == ESP_OK)
+    result = ledc_update_duty(kLedcMode, held_high);
+  if (result == ESP_OK)
+    result = ledc_set_duty(kLedcMode, brake_pwm, brake_count);
+  if (result == ESP_OK)
+    result = ledc_update_duty(kLedcMode, brake_pwm);
+  return result;
+}
+
 } // namespace
 
 esp_err_t FinActuator::initializeMotor() {
@@ -357,7 +388,13 @@ esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
   const bool positive_in1 = flight_config::kPositiveTorqueUsesIn1
                                 ? positive_voltage
                                 : !positive_voltage;
-  return drive(positive_in1 ? duty : -duty);
+  const double signed_duty = positive_in1 ? duty : -duty;
+
+  // Roll Controlだけはaverage terminal voltage modelと整合するdrive/brake PWMを
+  // 使用する。Zero Holdは従来のdrive/coast経路を変えない。
+  if (state_.load(std::memory_order_acquire) == FinState::roll_control)
+    return driveBrakePwm(signed_duty);
+  return drive(signed_duty);
 }
 
 esp_err_t FinActuator::drive(double duty_signed) {
