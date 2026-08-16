@@ -135,14 +135,16 @@ Open負方向を「反時計回り」、Close正方向を「時計回り」と�
 
 本飛行ではSpica `f7c477bff52c5a404ba25f7adbbe92aac68c819a`で記録されたfin装着characterizationの換算値をZeroHold固定値として採用する。Spica artifact上の`production_selectable=false`は元解析時点のstatusだが、本Mission firmwareでは運用判断によりflight-fixedとして扱う。
 
-制御構造はSpica revision 3のselected variantに合わせ、angle dead-zoneなし、rate continuous dead-zone 1.0 deg/s、requested-torque dead-zone/hysteresisなし、最後に要求torqueを±0.80 N mへclampする。
+制御構造はSpica revision 3のselected variantに合わせ、angle dead-zoneなし、rate continuous dead-zone 1.0 deg/s、requested-torque dead-zone/hysteresisなしとする。authorityはfin装着実機試験で直接使用した`±600 command`まで戻し、既存TorqueMapper換算ではrequested torque `±1.369544677734375 N m`相当とする。
 
 | item | value | status |
 |---|---:|---|
 | Kp | 65.390941574 N m/rad | 本飛行固定 |
 | Kd | 3.269547079 N m/(rad/s) | 本飛行固定 |
 | rate continuous dead-zone | 1.0 deg/s | 本飛行固定 |
-| requested torque limit | 0.80 N m | 本飛行固定 |
+| characterization command limit | ±600 | 実機試験済み範囲 |
+| N m per command | 0.0022825744628906255 | TorqueMapper換算 |
+| requested torque limit equivalent | 1.369544677734375 N m | ±600 command換算 |
 | requested torque conditioner | none | 本飛行固定 |
 | motor resistance | 3.48 ohm | TorqueMapper固定値 |
 | torque constant | 0.00855 N m/A | TorqueMapper固定値 |
@@ -156,11 +158,11 @@ Open負方向を「反時計回り」、Close正方向を「時計回り」と�
 
 `gear ratio = 176.175`はencoder/motor側角度をFin出力軸角へ変換するために使用する。ZeroHold/RollControlへ渡すFin angle/rateはgear ratio変換後の値とする。
 
-Spicaのfin装着characterizationはcommand-domainの応答を実測しており、上表Kp/KdのN m換算には既存TorqueMapperを使用している。actual motor current、actual shaft torque、Vbusはそのcaptureで直接計測していない。この測定上の区別は残すが、runtime command/NVSから値を変更する仕組みは設けない。
+Spicaのfin装着characterizationはcommand-domainの応答を実測しており、上表Kp/Kdおよびrequested torque limitのN m換算には既存TorqueMapperを使用している。actual motor current、actual shaft torque、Vbusはそのcaptureで直接計測していない。このため「±600 commandまで実機で使用した」ことと「±1.369544677734375 N mを実測した」ことは同義ではない。runtime command/NVSから値を変更する仕組みは設けない。
 
 AS5047D angleまたはFin rateがinvalidなtickではZeroHold要求torqueを生成せず、motorをHi-Zとする。従来のようにrate invalidを0 rad/sへ置換してP項だけで保持しない。
 
-±15 degの外向きcommand禁止はZeroHold gain変更後も維持する。
+±15 degの外向きcommand禁止はZeroHold authority変更後も維持する。
 
 ## 6. Logging constants
 
