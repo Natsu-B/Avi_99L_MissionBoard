@@ -135,7 +135,8 @@ esp_err_t FinActuator::initialize() {
 }
 
 esp_err_t FinActuator::setZero() {
-  if (!motor_initialized_ || !encoder_tracking_initialized_ ||
+  // Zero captureはAS5047Dの現在位置だけで成立する。モータ初期化状態には依存させない。
+  if (!encoder_tracking_initialized_ ||
       !encoder_valid_.load(std::memory_order_acquire))
     return ESP_ERR_INVALID_STATE;
 
