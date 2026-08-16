@@ -25,11 +25,14 @@ constexpr uint32_t kParaMotionTimeoutMs = 2'000;
 constexpr uint32_t kParaReconnectMs = 1'000;
 
 // Spicaのfin装着characterizationを本飛行のZeroHold固定値として採用する。
-// Kp/Kdはcommand-domain実測を既存TorqueMapperへ換算した値であり、
+// Kp/Kdとauthorityはcommand-domain実測を既存TorqueMapperへ換算した値であり、
 // requested torqueそのものを直接計測した値ではない。
 constexpr double kFinZeroHoldKpNmPerRad = 65.390941574;
 constexpr double kFinZeroHoldKdNmPerRadS = 3.269547079;
-constexpr double kFinZeroHoldTorqueLimitNm = 0.80;
+constexpr double kFinZeroHoldCharacterizationCommandLimit = 600.0;
+constexpr double kFinZeroHoldNmPerCommand = 0.0022825744628906255;
+constexpr double kFinZeroHoldTorqueLimitNm =
+    kFinZeroHoldCharacterizationCommandLimit * kFinZeroHoldNmPerCommand;
 // Spica revision 3選択variantと同じcontinuous rate dead-zoneを使用する。
 constexpr double kFinZeroHoldRateDeadZoneDegS = 1.0;
 constexpr double kMotorResistanceOhm = 3.48;
