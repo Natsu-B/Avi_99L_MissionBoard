@@ -175,12 +175,17 @@ int main() {
   assert(control_output.valid);
   assert(std::abs(control_output.torque_nm + 0.08) < 1.0e-12);
 
-  // 本番ZeroHold定数とSpicaのcontinuous rate dead-zoneを固定する。
+  // 本番ZeroHold定数とSpicaのcommand-domain authorityを固定する。
   assert(std::abs(flight_config::kFinZeroHoldKpNmPerRad - 65.390941574) <
          1.0e-12);
   assert(std::abs(flight_config::kFinZeroHoldKdNmPerRadS - 3.269547079) <
          1.0e-12);
-  assert(std::abs(flight_config::kFinZeroHoldTorqueLimitNm - 0.80) < 1.0e-12);
+  assert(std::abs(flight_config::kFinZeroHoldCharacterizationCommandLimit -
+                  600.0) < 1.0e-12);
+  assert(std::abs(flight_config::kFinZeroHoldNmPerCommand -
+                  0.0022825744628906255) < 1.0e-15);
+  assert(std::abs(flight_config::kFinZeroHoldTorqueLimitNm -
+                  1.3695446777343754) < 1.0e-12);
   assert(std::abs(flight_config::kFinZeroHoldRateDeadZoneDegS - 1.0) <
          1.0e-12);
   assert(std::abs(flight_config::kMotorMaxCurrentA - 2.2) < 1.0e-12);
@@ -216,7 +221,8 @@ int main() {
       control::computeZeroHold({5.0 * kDegToRad, 0.0}, zero_hold_config);
   assert(saturated_zero_hold.valid);
   assert(saturated_zero_hold.saturated);
-  assert(std::abs(saturated_zero_hold.torque_nm + 0.80) < 1.0e-12);
+  assert(std::abs(saturated_zero_hold.torque_nm +
+                  flight_config::kFinZeroHoldTorqueLimitNm) < 1.0e-12);
 
   const auto invalid_zero_hold = control::computeZeroHold(
       {std::numeric_limits<double>::quiet_NaN(), 0.0}, zero_hold_config);
