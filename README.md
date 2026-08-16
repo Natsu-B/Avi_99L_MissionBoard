@@ -47,13 +47,14 @@ Fin zeroはNVSへ保存しません。再起動後はencoderの周回数を復�
 
 - `Kp = 65.390941574 N m/rad`
 - `Kd = 3.269547079 N m s/rad`
-- requested torque limit `= 0.80 N m`
+- characterization command limit `= ±600`
+- requested torque limit equivalent `= ±1.369544677734375 N m`
 - rate continuous dead-zone `= 1.0 deg/s`
 - requested-torque dead-zone/hysteresis `= none`
 
-演算順序はSpicaの`mission_zero_hold_step`と同じく、angle/rateへcontinuous dead-zoneを適用してPD要求torqueを計算し、最後に`±0.80 N m`へclampします。AS5047D angleまたはFin rateがinvalidなtickではZeroHold出力を生成せずmotorをHi-Zへ落とし、validなrateが復帰したtickから保持を再開します。
+演算順序はSpicaの`mission_zero_hold_step`と同じく、angle/rateへcontinuous dead-zoneを適用してPD要求torqueを計算し、最後にSpica実機試験の`±600 command`相当へclampします。AS5047D angleまたはFin rateがinvalidなtickではZeroHold出力を生成せずmotorをHi-Zへ落とし、validなrateが復帰したtickから保持を再開します。
 
-Kp/Kdはfin装着command-domain実測を既存TorqueMapperへ換算した値です。fin装着試験ではactual current/torqueを直接計測していないため、この区別は残しますが、firmware上は本飛行の固定値として扱います。
+`±1.369544677734375 N m`はSpica artifactの`0.0022825744628906255 N m/command`換算を使ったrequested-torque相当値です。fin装着試験ではactual current/torqueを直接計測していないため、実測済みなのは`±600 command`までのcommand-domain authorityであるという区別を残します。
 
 ## RollControl
 
