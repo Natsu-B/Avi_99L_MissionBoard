@@ -53,12 +53,14 @@ private:
   [[nodiscard]] esp_err_t initializeEncoderTransport();
   [[nodiscard]] esp_err_t initializeMotor();
   [[nodiscard]] esp_err_t drive(double duty_signed);
+  [[nodiscard]] esp_err_t driveCommand(int16_t command);
   [[nodiscard]] esp_err_t coast();
   [[nodiscard]] esp_err_t applyOutputTorque(double torque_nm,
                                             double angle_rad,
                                             double rate_rad_s);
-  [[nodiscard]] double zeroHoldTorque(double angle_rad,
-                                      double rate_rad_s) const;
+  [[nodiscard]] int16_t zeroHoldCommand(double angle_rad, double rate_rad_s,
+                                        double dt_s);
+  void resetZeroHoldController();
 
   SPICREATE spi_{};
   AS5047D encoder_{};
@@ -81,6 +83,11 @@ private:
   double encoder_unwrapped_rad_{};
   double zero_encoder_unwrapped_rad_{};
   uint64_t previous_timestamp_us_{};
+
+  // characterization用Zero Holdと同じcommand-domain PID状態。
+  double zero_hold_integral_error_deg_s_{};
+  double zero_hold_filtered_rate_deg_s_{};
+  bool zero_hold_velocity_initialized_{};
 
   double requested_roll_torque_nm_{};
 };

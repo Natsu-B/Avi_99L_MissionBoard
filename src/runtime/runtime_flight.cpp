@@ -22,7 +22,7 @@ protocol::CommandReason reasonForEsp(esp_err_t result) {
   if (result == ESP_ERR_TIMEOUT)
     return protocol::CommandReason::timeout;
   if (result == ESP_ERR_INVALID_STATE)
-    return protocol::CommandReason::busy;
+    return protocol::CommandReason::invalid_state;
   return protocol::CommandReason::device_unavailable;
 }
 

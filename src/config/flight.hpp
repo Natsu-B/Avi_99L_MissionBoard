@@ -24,17 +24,31 @@ constexpr uint32_t kParaPowerStabilizationMs = 100;
 constexpr uint32_t kParaMotionTimeoutMs = 2'000;
 constexpr uint32_t kParaReconnectMs = 1'000;
 
-// Spicaのfin装着characterizationを本飛行のZeroHold固定値として採用する。
-// Kp/Kdとauthorityはcommand-domain実測を既存TorqueMapperへ換算した値であり、
-// requested torqueそのものを直接計測した値ではない。
+// moving_fin_system_identificationで実機成立したZero Holdを、
+// command-domainのまま本番経路で再現する。単位はTB67H450FNGへ与える±1024 command。
+constexpr double kFinZeroHoldKpCommandPerDeg = 500.0;
+constexpr double kFinZeroHoldKiCommandPerDegS = 35.0;
+constexpr double kFinZeroHoldKdCommandPerDegPerS = 25.0;
+constexpr double kFinZeroHoldIntegralLimitDegS = 2.0;
+constexpr double kFinZeroHoldVelocityFilterTauS = 0.020;
+constexpr double kFinZeroHoldDeadbandDeg = 0.050;
+constexpr double kFinZeroHoldDeadbandRateDegS = 0.5;
+constexpr double kFinZeroHoldMinimumActiveErrorDeg = 0.080;
+constexpr int16_t kFinZeroHoldMinimumCommand = 70;
+constexpr int16_t kFinZeroHoldControlCommandLimit = 800;
+constexpr double kMotorCommandFullScale = 1024.0;
+
+// 旧Spica PD/host-testとRoll Control側のNm換算互換用。
+// Zero Hold本番経路ではこのNm-equivalent変換を使用しない。
+constexpr double kFinZeroHoldNmPerCommand = 0.0022825744628906255;
 constexpr double kFinZeroHoldKpNmPerRad = 65.390941574;
+constexpr double kFinZeroHoldKiNmPerRadS = 4.577365910;
 constexpr double kFinZeroHoldKdNmPerRadS = 3.269547079;
 constexpr double kFinZeroHoldCharacterizationCommandLimit = 600.0;
-constexpr double kFinZeroHoldNmPerCommand = 0.0022825744628906255;
 constexpr double kFinZeroHoldTorqueLimitNm =
     kFinZeroHoldCharacterizationCommandLimit * kFinZeroHoldNmPerCommand;
-// Spica revision 3選択variantと同じcontinuous rate dead-zoneを使用する。
 constexpr double kFinZeroHoldRateDeadZoneDegS = 1.0;
+
 constexpr double kMotorResistanceOhm = 3.48;
 constexpr double kMotorTorqueConstantNmPerA = 0.00855;
 constexpr double kMotorSpeedConstantRpmPerV = 1120.0;
