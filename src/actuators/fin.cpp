@@ -7,7 +7,6 @@
 #include "actuators/safe_outputs.hpp"
 #include "config/board.hpp"
 #include "config/flight.hpp"
-#include "control/zero_hold.hpp"
 #include "driver/ledc.h"
 
 namespace actuators {
@@ -104,6 +103,11 @@ esp_err_t FinActuator::initializeEncoderTransport() {
   return result;
 }
 
+void FinActuator::resetZeroHoldController() {
+  control::resetZeroHold(zero_hold_state_);
+  zero_hold_output_limited_ = false;
+}
+
 esp_err_t FinActuator::initialize() {
   if (encoder_mutex_ == nullptr)
     encoder_mutex_ = xSemaphoreCreateMutex();
@@ -124,6 +128,7 @@ esp_err_t FinActuator::initialize() {
   zero_valid_.store(false, std::memory_order_release);
   encoder_valid_.store(false, std::memory_order_release);
   rate_valid_.store(false, std::memory_order_release);
+  resetZeroHoldController();
   encoder_health_.markHealthy();
   state_.store(FinState::free, std::memory_order_release);
   return coast();
@@ -137,6 +142,7 @@ esp_err_t FinActuator::setZero() {
   zero_encoder_unwrapped_rad_ = encoder_unwrapped_rad_;
   angle_rad_.store(0.0, std::memory_order_release);
   zero_valid_.store(true, std::memory_order_release);
+  resetZeroHoldController();
   return ESP_OK;
 }
 
@@ -144,6 +150,9 @@ esp_err_t FinActuator::zeroHold() {
   if (!motor_initialized_ || !zero_valid_.load(std::memory_order_acquire))
     return ESP_ERR_INVALID_STATE;
 
+  const FinState previous_state = state_.load(std::memory_order_acquire);
+  if (previous_state != FinState::zero_hold)
+    resetZeroHoldController();
   state_.store(FinState::zero_hold, std::memory_order_release);
   requested_roll_torque_nm_ = 0.0;
   if (!encoder_valid_.load(std::memory_order_acquire) ||
@@ -152,7 +161,7 @@ esp_err_t FinActuator::zeroHold() {
 
   const double angle = angle_rad_.load(std::memory_order_acquire);
   const double rate = rate_rad_s_.load(std::memory_order_acquire);
-  return applyOutputTorque(zeroHoldTorque(angle, rate), angle, rate);
+  return applyOutputTorque(zeroHoldTorque(angle, rate, 0.001), angle, rate);
 }
 
 esp_err_t FinActuator::setRollControlTorque(double torque_nm) {
@@ -161,6 +170,8 @@ esp_err_t FinActuator::setRollControlTorque(double torque_nm) {
       !rate_valid_.load(std::memory_order_acquire) || !std::isfinite(torque_nm))
     return ESP_ERR_INVALID_STATE;
 
+  if (state_.load(std::memory_order_acquire) == FinState::zero_hold)
+    resetZeroHoldController();
   requested_roll_torque_nm_ = torque_nm;
   state_.store(FinState::roll_control, std::memory_order_release);
   const double angle = angle_rad_.load(std::memory_order_acquire);
@@ -173,19 +184,24 @@ esp_err_t FinActuator::setRollControlTorque(double torque_nm) {
 
 esp_err_t FinActuator::free() {
   requested_roll_torque_nm_ = 0.0;
+  resetZeroHoldController();
   state_.store(FinState::free, std::memory_order_release);
   return coast();
 }
 
-double FinActuator::zeroHoldTorque(double angle_rad, double rate_rad_s) const {
+double FinActuator::zeroHoldTorque(double angle_rad, double rate_rad_s,
+                                   double dt_s) {
   const control::ZeroHoldConfig config{
       flight_config::kFinZeroHoldKpNmPerRad,
+      flight_config::kFinZeroHoldKiNmPerRadS,
       flight_config::kFinZeroHoldKdNmPerRadS,
-      flight_config::kFinZeroHoldTorqueLimitNm,
-      0.0,
-      flight_config::kFinZeroHoldRateDeadZoneDegS * kDegToRad};
-  const auto output =
-      control::computeZeroHold({angle_rad, rate_rad_s}, config);
+      flight_config::kFinZeroHoldIntegralLimitDegS * kDegToRad,
+      flight_config::kFinZeroHoldVelocityFilterTauS,
+      flight_config::kFinZeroHoldDeadbandDeg * kDegToRad,
+      flight_config::kFinZeroHoldDeadbandRateDegS * kDegToRad};
+  const auto output = control::computeZeroHold(
+      {angle_rad, rate_rad_s, dt_s}, config, zero_hold_state_,
+      !zero_hold_output_limited_);
   return output.valid ? output.torque_nm : 0.0;
 }
 
@@ -207,6 +223,8 @@ void FinActuator::update(uint64_t now_us) {
     encoder_valid_.store(false, std::memory_order_release);
     rate_valid_.store(false, std::memory_order_release);
     encoder_health_.markFailure(kEncoderFailureThreshold);
+    if (state_.load(std::memory_order_acquire) == FinState::zero_hold)
+      resetZeroHoldController();
     if (state_.load(std::memory_order_acquire) != FinState::free)
       (void)coast();
     return;
@@ -215,6 +233,7 @@ void FinActuator::update(uint64_t now_us) {
   encoder_health_.markHealthy();
 
   double encoder_delta_rad = 0.0;
+  double sample_dt_s = 0.001;
   bool rate_valid = false;
   if (!encoder_tracking_initialized_) {
     if (encoder_unwrapped_valid_) {
@@ -237,6 +256,7 @@ void FinActuator::update(uint64_t now_us) {
       const double dt =
           static_cast<double>(now_us - previous_timestamp_us_) * 1.0e-6;
       if (dt > 0.0 && dt <= 0.01) {
+        sample_dt_s = dt;
         const double fin_delta_rad = fin_kinematics::encoderToFinRadians(
             encoder_delta_rad, flight_config::kTotalGearRatio);
         const double rate = fin_delta_rad / dt;
@@ -270,11 +290,13 @@ void FinActuator::update(uint64_t now_us) {
   const FinState state = state_.load(std::memory_order_acquire);
   if (state == FinState::zero_hold) {
     if (!rate_valid) {
+      resetZeroHoldController();
       (void)coast();
       return;
     }
     const double rate = rate_rad_s_.load(std::memory_order_acquire);
-    (void)applyOutputTorque(zeroHoldTorque(angle, rate), angle, rate);
+    (void)applyOutputTorque(zeroHoldTorque(angle, rate, sample_dt_s), angle,
+                            rate);
   } else if (state == FinState::roll_control) {
     if (!rate_valid) {
       (void)coast();
@@ -296,6 +318,8 @@ esp_err_t FinActuator::recoverEncoder() {
   encoder_health_.markRecovering();
   encoder_valid_.store(false, std::memory_order_release);
   rate_valid_.store(false, std::memory_order_release);
+  if (state_.load(std::memory_order_acquire) == FinState::zero_hold)
+    resetZeroHoldController();
   if (state_.load(std::memory_order_acquire) != FinState::free)
     (void)coast();
 
@@ -327,18 +351,28 @@ esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
       !std::isfinite(angle_rad) || !std::isfinite(rate_rad_s))
     return ESP_ERR_INVALID_STATE;
 
+  const bool zero_hold =
+      state_.load(std::memory_order_acquire) == FinState::zero_hold;
+  bool actuator_limited = false;
+
   const double command_limit =
       flight_config::kFinOutwardCommandLimitDeg * kDegToRad;
   if ((angle_rad >= command_limit && torque_nm > 0.0) ||
-      (angle_rad <= -command_limit && torque_nm < 0.0))
+      (angle_rad <= -command_limit && torque_nm < 0.0)) {
     torque_nm = 0.0;
+    actuator_limited = true;
+  }
 
   const double motor_torque =
       torque_nm / (flight_config::kTotalGearRatio *
                    flight_config::kDrivetrainEfficiency);
-  double current = motor_torque / flight_config::kMotorTorqueConstantNmPerA;
-  current = std::clamp(current, -flight_config::kMotorMaxCurrentA,
-                       flight_config::kMotorMaxCurrentA);
+  const double requested_current =
+      motor_torque / flight_config::kMotorTorqueConstantNmPerA;
+  double current = std::clamp(requested_current,
+                              -flight_config::kMotorMaxCurrentA,
+                              flight_config::kMotorMaxCurrentA);
+  if (current != requested_current)
+    actuator_limited = true;
 
   const double motor_speed_rad_s =
       rate_rad_s * flight_config::kTotalGearRatio;
@@ -347,11 +381,28 @@ esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
       motor_speed_rpm / flight_config::kMotorSpeedConstantRpmPerV;
   const double voltage =
       current * flight_config::kMotorResistanceOhm + back_emf;
-  double duty =
-      std::clamp(std::abs(voltage) / flight_config::kMotorBusVoltageV, 0.0,
-                 flight_config::kMotorMaximumDuty);
-  if (std::abs(torque_nm) < 1.0e-4 && std::abs(rate_rad_s) < 1.0e-3)
+  const double requested_duty =
+      std::abs(voltage) / flight_config::kMotorBusVoltageV;
+  double duty = std::clamp(requested_duty, 0.0,
+                           flight_config::kMotorMaximumDuty);
+  if (duty != requested_duty)
+    actuator_limited = true;
+
+  if (std::abs(torque_nm) < 1.0e-4 && std::abs(rate_rad_s) < 1.0e-3) {
     duty = 0.0;
+  } else if (zero_hold &&
+             std::abs(angle_rad) >=
+                 flight_config::kFinZeroHoldMinimumActiveErrorDeg * kDegToRad) {
+    // min70はcontroller torqueではなくPWM側のstiction補償として適用する。
+    const double minimum_duty =
+        flight_config::kFinZeroHoldMinimumCommand /
+        flight_config::kMotorCommandFullScale;
+    if (duty > 0.0 && duty < minimum_duty)
+      duty = minimum_duty;
+  }
+
+  if (zero_hold)
+    zero_hold_output_limited_ = actuator_limited;
 
   const bool positive_voltage = voltage >= 0.0;
   const bool positive_in1 = flight_config::kPositiveTorqueUsesIn1
@@ -398,6 +449,7 @@ esp_err_t FinActuator::coast() {
 
 void FinActuator::forceSafe() {
   requested_roll_torque_nm_ = 0.0;
+  resetZeroHoldController();
   state_.store(FinState::free, std::memory_order_release);
   zero_valid_.store(false, std::memory_order_release);
   encoder_valid_.store(false, std::memory_order_release);

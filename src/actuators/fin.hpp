@@ -5,6 +5,7 @@
 
 #include "AS5047D.h"
 #include "SPICREATE.h"
+#include "control/zero_hold.hpp"
 #include "diagnostics/device_health.hpp"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -57,8 +58,9 @@ private:
   [[nodiscard]] esp_err_t applyOutputTorque(double torque_nm,
                                             double angle_rad,
                                             double rate_rad_s);
-  [[nodiscard]] double zeroHoldTorque(double angle_rad,
-                                      double rate_rad_s) const;
+  [[nodiscard]] double zeroHoldTorque(double angle_rad, double rate_rad_s,
+                                      double dt_s);
+  void resetZeroHoldController();
 
   SPICREATE spi_{};
   AS5047D encoder_{};
@@ -82,6 +84,8 @@ private:
   double zero_encoder_unwrapped_rad_{};
   uint64_t previous_timestamp_us_{};
 
+  control::ZeroHoldState zero_hold_state_{};
+  bool zero_hold_output_limited_{};
   double requested_roll_torque_nm_{};
 };
 
