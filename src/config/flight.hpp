@@ -24,23 +24,26 @@ constexpr uint32_t kParaPowerStabilizationMs = 100;
 constexpr uint32_t kParaMotionTimeoutMs = 2'000;
 constexpr uint32_t kParaReconnectMs = 1'000;
 
-// moving_fin_system_identificationで実機使用したcommand-domain PIDを、
-// 既存TorqueMapperと同じNm-equivalent座標へ変換したZeroHold値。
-// actual shaft torqueを直接計測した値ではない。
-constexpr double kFinZeroHoldNmPerCommand = 0.0022825744628906255;
-constexpr double kFinZeroHoldKpNmPerRad = 65.390941574;
-constexpr double kFinZeroHoldKiNmPerRadS = 4.577365910;
-constexpr double kFinZeroHoldKdNmPerRadS = 3.269547079;
+// moving_fin_system_identificationで実機成立したZero Holdを、
+// command-domainのまま本番経路で再現する。単位はTB67H450FNGへ与える±1024 command。
+constexpr double kFinZeroHoldKpCommandPerDeg = 500.0;
+constexpr double kFinZeroHoldKiCommandPerDegS = 35.0;
+constexpr double kFinZeroHoldKdCommandPerDegPerS = 25.0;
 constexpr double kFinZeroHoldIntegralLimitDegS = 2.0;
 constexpr double kFinZeroHoldVelocityFilterTauS = 0.020;
 constexpr double kFinZeroHoldDeadbandDeg = 0.050;
 constexpr double kFinZeroHoldDeadbandRateDegS = 0.5;
 constexpr double kFinZeroHoldMinimumActiveErrorDeg = 0.080;
-// min70はphysical breakaway値ではなく、実機で成立したstiction補償値。
-constexpr double kFinZeroHoldMinimumCommand = 70.0;
+constexpr int16_t kFinZeroHoldMinimumCommand = 70;
+constexpr int16_t kFinZeroHoldControlCommandLimit = 800;
 constexpr double kMotorCommandFullScale = 1024.0;
 
-// 旧Spica PD/host-testとの互換用。新しいflight ZeroHold経路では使用しない。
+// 旧Spica PD/host-testとRoll Control側のNm換算互換用。
+// Zero Hold本番経路ではこのNm-equivalent変換を使用しない。
+constexpr double kFinZeroHoldNmPerCommand = 0.0022825744628906255;
+constexpr double kFinZeroHoldKpNmPerRad = 65.390941574;
+constexpr double kFinZeroHoldKiNmPerRadS = 4.577365910;
+constexpr double kFinZeroHoldKdNmPerRadS = 3.269547079;
 constexpr double kFinZeroHoldCharacterizationCommandLimit = 600.0;
 constexpr double kFinZeroHoldTorqueLimitNm =
     kFinZeroHoldCharacterizationCommandLimit * kFinZeroHoldNmPerCommand;

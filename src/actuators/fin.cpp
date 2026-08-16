@@ -104,8 +104,9 @@ esp_err_t FinActuator::initializeEncoderTransport() {
 }
 
 void FinActuator::resetZeroHoldController() {
-  control::resetZeroHold(zero_hold_state_);
-  zero_hold_output_limited_ = false;
+  zero_hold_integral_error_deg_s_ = 0.0;
+  zero_hold_filtered_rate_deg_s_ = 0.0;
+  zero_hold_velocity_initialized_ = false;
 }
 
 esp_err_t FinActuator::initialize() {
@@ -152,17 +153,17 @@ esp_err_t FinActuator::zeroHold() {
     return ESP_ERR_INVALID_STATE;
 
   const FinState previous_state = state_.load(std::memory_order_acquire);
-  if (previous_state != FinState::zero_hold)
+  if (previous_state != FinState::zero_hold) {
     resetZeroHoldController();
-  state_.store(FinState::zero_hold, std::memory_order_release);
-  requested_roll_torque_nm_ = 0.0;
-  if (!encoder_valid_.load(std::memory_order_acquire) ||
-      !rate_valid_.load(std::memory_order_acquire))
-    return coast();
+    // characterization版のarmと同様、保持開始時はいったん両入力をLOWにする。
+    const esp_err_t result = driveCommand(0);
+    if (result != ESP_OK)
+      return result;
+  }
 
-  const double angle = angle_rad_.load(std::memory_order_acquire);
-  const double rate = rate_rad_s_.load(std::memory_order_acquire);
-  return applyOutputTorque(zeroHoldTorque(angle, rate, 0.001), angle, rate);
+  requested_roll_torque_nm_ = 0.0;
+  state_.store(FinState::zero_hold, std::memory_order_release);
+  return ESP_OK;
 }
 
 esp_err_t FinActuator::setRollControlTorque(double torque_nm) {
@@ -190,20 +191,75 @@ esp_err_t FinActuator::free() {
   return coast();
 }
 
-double FinActuator::zeroHoldTorque(double angle_rad, double rate_rad_s,
-                                   double dt_s) {
-  const control::ZeroHoldConfig config{
-      flight_config::kFinZeroHoldKpNmPerRad,
-      flight_config::kFinZeroHoldKiNmPerRadS,
-      flight_config::kFinZeroHoldKdNmPerRadS,
-      flight_config::kFinZeroHoldIntegralLimitDegS * kDegToRad,
-      flight_config::kFinZeroHoldVelocityFilterTauS,
-      flight_config::kFinZeroHoldDeadbandDeg * kDegToRad,
-      flight_config::kFinZeroHoldDeadbandRateDegS * kDegToRad};
-  const auto output = control::computeZeroHold(
-      {angle_rad, rate_rad_s, dt_s}, config, zero_hold_state_,
-      !zero_hold_output_limited_);
-  return output.valid ? output.torque_nm : 0.0;
+int16_t FinActuator::zeroHoldCommand(double angle_rad, double rate_rad_s,
+                                     double dt_s) {
+  if (!std::isfinite(angle_rad) || !std::isfinite(rate_rad_s) ||
+      !std::isfinite(dt_s) || dt_s <= 0.0)
+    return 0;
+
+  const double fin_angle_deg = angle_rad * kRadToDeg;
+  const double fin_rate_deg_s = rate_rad_s * kRadToDeg;
+
+  // 添付characterization版のupdateVelocityと同じ一次遅れfilter。
+  if (!zero_hold_velocity_initialized_) {
+    zero_hold_filtered_rate_deg_s_ = 0.0;
+    zero_hold_velocity_initialized_ = true;
+  } else {
+    const double alpha =
+        dt_s / (flight_config::kFinZeroHoldVelocityFilterTauS + dt_s);
+    zero_hold_filtered_rate_deg_s_ +=
+        alpha * (fin_rate_deg_s - zero_hold_filtered_rate_deg_s_);
+  }
+
+  const double error_deg = -fin_angle_deg;
+  if (std::abs(error_deg) <= flight_config::kFinZeroHoldDeadbandDeg &&
+      std::abs(zero_hold_filtered_rate_deg_s_) <=
+          flight_config::kFinZeroHoldDeadbandRateDegS) {
+    // 目標近傍では出力を切り、積分残留を減衰させる。
+    zero_hold_integral_error_deg_s_ *= 0.95;
+    if (std::abs(zero_hold_integral_error_deg_s_) < 0.001)
+      zero_hold_integral_error_deg_s_ = 0.0;
+    return 0;
+  }
+
+  zero_hold_integral_error_deg_s_ += error_deg * dt_s;
+  zero_hold_integral_error_deg_s_ = std::clamp(
+      zero_hold_integral_error_deg_s_,
+      -flight_config::kFinZeroHoldIntegralLimitDegS,
+      flight_config::kFinZeroHoldIntegralLimitDegS);
+
+  const double command_f =
+      flight_config::kFinZeroHoldKpCommandPerDeg * error_deg +
+      flight_config::kFinZeroHoldKiCommandPerDegS *
+          zero_hold_integral_error_deg_s_ -
+      flight_config::kFinZeroHoldKdCommandPerDegPerS *
+          zero_hold_filtered_rate_deg_s_;
+
+  long command = std::lround(command_f);
+  command = std::clamp(
+      command,
+      -static_cast<long>(flight_config::kFinZeroHoldControlCommandLimit),
+      static_cast<long>(flight_config::kFinZeroHoldControlCommandLimit));
+
+  int16_t result = static_cast<int16_t>(command);
+  if (std::abs(error_deg) >=
+          flight_config::kFinZeroHoldMinimumActiveErrorDeg &&
+      result != 0) {
+    const int magnitude = result < 0 ? -static_cast<int>(result)
+                                     : static_cast<int>(result);
+    if (magnitude < flight_config::kFinZeroHoldMinimumCommand)
+      result = result > 0 ? flight_config::kFinZeroHoldMinimumCommand
+                          : -flight_config::kFinZeroHoldMinimumCommand;
+  }
+
+  // characterization版のsoft limitと同じく、外向き指令だけを止める。
+  if ((result > 0 &&
+       fin_angle_deg >= flight_config::kFinOutwardCommandLimitDeg) ||
+      (result < 0 &&
+       fin_angle_deg <= -flight_config::kFinOutwardCommandLimitDeg))
+    return 0;
+
+  return result;
 }
 
 void FinActuator::update(uint64_t now_us) {
@@ -296,8 +352,7 @@ void FinActuator::update(uint64_t now_us) {
       return;
     }
     const double rate = rate_rad_s_.load(std::memory_order_acquire);
-    (void)applyOutputTorque(zeroHoldTorque(angle, rate, sample_dt_s), angle,
-                            rate);
+    (void)driveCommand(zeroHoldCommand(angle, rate, sample_dt_s));
   } else if (state == FinState::roll_control) {
     if (!rate_valid) {
       (void)coast();
@@ -352,28 +407,20 @@ esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
       !std::isfinite(angle_rad) || !std::isfinite(rate_rad_s))
     return ESP_ERR_INVALID_STATE;
 
-  const bool zero_hold =
-      state_.load(std::memory_order_acquire) == FinState::zero_hold;
-  bool actuator_limited = false;
-
   const double command_limit =
       flight_config::kFinOutwardCommandLimitDeg * kDegToRad;
   if ((angle_rad >= command_limit && torque_nm > 0.0) ||
-      (angle_rad <= -command_limit && torque_nm < 0.0)) {
+      (angle_rad <= -command_limit && torque_nm < 0.0))
     torque_nm = 0.0;
-    actuator_limited = true;
-  }
 
   const double motor_torque =
       torque_nm / (flight_config::kTotalGearRatio *
                    flight_config::kDrivetrainEfficiency);
   const double requested_current =
       motor_torque / flight_config::kMotorTorqueConstantNmPerA;
-  double current = std::clamp(requested_current,
-                              -flight_config::kMotorMaxCurrentA,
-                              flight_config::kMotorMaxCurrentA);
-  if (current != requested_current)
-    actuator_limited = true;
+  const double current =
+      std::clamp(requested_current, -flight_config::kMotorMaxCurrentA,
+                 flight_config::kMotorMaxCurrentA);
 
   const double motor_speed_rad_s =
       rate_rad_s * flight_config::kTotalGearRatio;
@@ -386,24 +433,9 @@ esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
       std::abs(voltage) / flight_config::kMotorBusVoltageV;
   double duty = std::clamp(requested_duty, 0.0,
                            flight_config::kMotorMaximumDuty);
-  if (duty != requested_duty)
-    actuator_limited = true;
 
-  if (std::abs(torque_nm) < 1.0e-4 && std::abs(rate_rad_s) < 1.0e-3) {
+  if (std::abs(torque_nm) < 1.0e-4 && std::abs(rate_rad_s) < 1.0e-3)
     duty = 0.0;
-  } else if (zero_hold &&
-             std::abs(angle_rad) >=
-                 flight_config::kFinZeroHoldMinimumActiveErrorDeg * kDegToRad) {
-    // min70はcontroller torqueではなくPWM側のstiction補償として適用する。
-    const double minimum_duty =
-        flight_config::kFinZeroHoldMinimumCommand /
-        flight_config::kMotorCommandFullScale;
-    if (duty > 0.0 && duty < minimum_duty)
-      duty = minimum_duty;
-  }
-
-  if (zero_hold)
-    zero_hold_output_limited_ = actuator_limited;
 
   const bool positive_voltage = voltage >= 0.0;
   const bool positive_in1 = flight_config::kPositiveTorqueUsesIn1
@@ -434,18 +466,56 @@ esp_err_t FinActuator::drive(double duty_signed) {
   return result;
 }
 
+esp_err_t FinActuator::driveCommand(int16_t command) {
+  if (!motor_initialized_)
+    return ESP_ERR_INVALID_STATE;
+
+  const int32_t clamped = std::clamp<int32_t>(
+      command, -static_cast<int32_t>(flight_config::kMotorCommandFullScale),
+      static_cast<int32_t>(flight_config::kMotorCommandFullScale));
+
+  if (clamped == 0) {
+    esp_err_t result = ledc_set_duty(kLedcMode, kIn1Channel, 0);
+    if (result == ESP_OK)
+      result = ledc_update_duty(kLedcMode, kIn1Channel);
+    if (result == ESP_OK)
+      result = ledc_set_duty(kLedcMode, kIn2Channel, 0);
+    if (result == ESP_OK)
+      result = ledc_update_duty(kLedcMode, kIn2Channel);
+    return result;
+  }
+
+  const uint32_t magnitude = static_cast<uint32_t>(clamped < 0 ? -clamped
+                                                               : clamped);
+  // characterization版MotorDriverと同じ整数演算。1024 commandでも1023 count。
+  const uint32_t duty =
+      (magnitude * kMaximumDutyCount) /
+      static_cast<uint32_t>(flight_config::kMotorCommandFullScale);
+
+  const bool positive_command = clamped > 0;
+  const bool positive_in1 = flight_config::kPositiveTorqueUsesIn1
+                                ? positive_command
+                                : !positive_command;
+  const ledc_channel_t active = positive_in1 ? kIn1Channel : kIn2Channel;
+  const ledc_channel_t inactive = positive_in1 ? kIn2Channel : kIn1Channel;
+
+  esp_err_t result = ledc_set_duty(kLedcMode, inactive, 0);
+  if (result == ESP_OK)
+    result = ledc_update_duty(kLedcMode, inactive);
+  if (result == ESP_OK)
+    result = ledc_set_duty(kLedcMode, active, duty);
+  if (result == ESP_OK)
+    result = ledc_update_duty(kLedcMode, active);
+  return result;
+}
+
 esp_err_t FinActuator::coast() {
   if (!motor_initialized_)
     return safe_outputs::motorCoast();
 
-  esp_err_t result = ledc_stop(kLedcMode, kIn1Channel, 0);
-  const esp_err_t second = ledc_stop(kLedcMode, kIn2Channel, 0);
-  if (result == ESP_OK)
-    result = second;
-  const esp_err_t gpio_result = safe_outputs::motorCoast();
-  if (result == ESP_OK)
-    result = gpio_result;
-  return result;
+  // ledc_stop()やGPIO mode変更は行わない。characterization版と同じく
+  // 両PWM dutyを0にし、次の制御tickでそのまま再駆動できる状態を保つ。
+  return driveCommand(0);
 }
 
 void FinActuator::forceSafe() {
@@ -456,6 +526,8 @@ void FinActuator::forceSafe() {
   encoder_valid_.store(false, std::memory_order_release);
   rate_valid_.store(false, std::memory_order_release);
   (void)coast();
+  // forceSafeは再駆動を前提としないため、最後にGPIOも明示LOWへ固定する。
+  (void)safe_outputs::motorCoast();
 }
 
 FinTelemetry FinActuator::telemetry() const {
