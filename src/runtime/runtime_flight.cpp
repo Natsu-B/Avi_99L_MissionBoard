@@ -175,6 +175,14 @@ void Runtime::realtimeTask() {
 
     fin_.update(now);
 
+    // TEST ONLY: 電源投入位置を動翼0 degとして扱う。
+    // 最初の正常encoder sampleで一度だけcaptureし、通常のencoder復旧では
+    // zero_reference_validが保持されるため基準位置を取り直さない。
+    const auto fin_after_update = fin_.telemetry();
+    if (!snapshot.power_cutoff && fin_after_update.encoder_valid &&
+        !fin_after_update.zero_reference_valid)
+      (void)fin_.setZero();
+
     ActuatorCommand fin_command{};
     while (xQueueReceive(fin_command_queue_, &fin_command, 0) == pdTRUE) {
       esp_err_t result = ESP_ERR_INVALID_ARG;
