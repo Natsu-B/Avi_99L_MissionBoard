@@ -124,6 +124,38 @@ void Runtime::canTask() {
           continue;
         }
 
+        if (code == protocol::CommandCode::cancel_sequence) {
+          if (phase != mission::Phase::liftoff_detection) {
+            const protocol::CommandResult rejected{
+                request.transaction_id, request.command,
+                protocol::CommandPhase::rejected,
+                protocol::CommandReason::invalid_state, 0};
+            command_cache_.rememberAccepted(request);
+            command_cache_.finish(rejected);
+            sendCanFrame(protocol::encode(rejected));
+            continue;
+          }
+
+          command_cache_.rememberAccepted(request);
+          sendCanFrame(protocol::encode(
+              {request.transaction_id, request.command,
+               protocol::CommandPhase::accepted, protocol::CommandReason::none,
+               0}));
+
+          const bool ok = state_.cancelSequence();
+          const protocol::CommandResult final{
+              request.transaction_id,
+              request.command,
+              ok ? protocol::CommandPhase::completed
+                 : protocol::CommandPhase::failed,
+              ok ? protocol::CommandReason::none
+                 : protocol::CommandReason::invalid_state,
+              0};
+          command_cache_.finish(final);
+          sendCanFrame(protocol::encode(final));
+          continue;
+        }
+
         const bool is_fin =
             code == protocol::CommandCode::fin_free ||
             code == protocol::CommandCode::fin_zero ||
@@ -386,8 +418,7 @@ void Runtime::canTask() {
         message.flags |= protocol::ControlRollTelemetryV2::control_active;
       if (reference_valid &&
           message.control_roll_reference_unwrapped_raw == 0x800AU)
-        message.flags |=
-            protocol::ControlRollTelemetryV2::reference_out_of_range;
+        message.flags |= protocol::ControlRollTelemetryV2::reference_out_of_range;
       if (reference_valid &&
           message.roll_deviation_unwrapped_raw == 0x800AU)
         message.flags |=
