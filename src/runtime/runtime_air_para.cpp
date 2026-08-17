@@ -127,12 +127,9 @@ void Runtime::airTask() {
     if (ssc_.initialized()) {
       const esp_err_t ssc_result = ssc_.read(ssc_data);
       if (ssc_result == ESP_OK &&
-          std::isfinite(ssc_data.differential_pressure_pa) &&
-          std::isfinite(ssc_data.temperature_celsius)) {
+          std::isfinite(ssc_data.differential_pressure_pa)) {
         ssc_new_valid = true;
         ssc_health_.markHealthy();
-        ssc_temperature_c_.store(ssc_data.temperature_celsius,
-                                 std::memory_order_release);
         ssc_sample_us_.store(now, std::memory_order_release);
         differential_valid = differential_pressure_filter_.update(
             ssc_data.differential_pressure_pa, filtered_differential_pa);
@@ -158,9 +155,11 @@ void Runtime::airTask() {
     ssc_valid_.store(ssc_fresh, std::memory_order_release);
 
     if (ssc_new_valid && differential_valid && lps_fresh) {
+      // AirDataの温度源はLPS25HBへ統一し、SSCのoptional temperatureは使用しない。
       const auto result = sensors::computeSaintVenantAirspeed(
           lps_pressure_hpa_.load(std::memory_order_acquire) * 100.0,
-          filtered_differential_pa, ssc_data.temperature_celsius,
+          filtered_differential_pa,
+          lps_temperature_c_.load(std::memory_order_acquire),
           flight_config::kPitotPressureCorrectionCoefficient);
       if (result.valid) {
         airspeed_mps_.store(result.airspeed_mps, std::memory_order_release);
