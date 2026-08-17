@@ -18,9 +18,7 @@ extern "C" void app_main() {
   const esp_err_t result = runtime.start();
   std::printf("runtime start: %s\n", esp_err_to_name(result));
   if (result != ESP_OK) {
-    (void)actuators::safe_outputs::motorCoast();
-    (void)actuators::safe_outputs::setAux5v(false);
-    (void)actuators::safe_outputs::setParaPower(false);
+    runtime.forceSafeAfterStartFailure();
     while (true)
       vTaskDelay(pdMS_TO_TICKS(1000));
   }

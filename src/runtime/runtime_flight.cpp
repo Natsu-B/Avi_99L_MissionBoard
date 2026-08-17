@@ -55,9 +55,11 @@ void Runtime::safetyTask() {
       if (flight_elapsed >= flight_config::kAbsolutePowerCutoffUs &&
           !cutoff_applied) {
         state_.latchPowerCutoff();
+        // motor writerはFin内の同一mutexで直列化し、atomic inhibitを
+        // 先にlatchして古いrealtime snapshotからの再driveを拒否する。
+        fin_.latchPowerCutoff();
         (void)actuators::safe_outputs::setParaPower(false);
         (void)actuators::safe_outputs::setAux5v(false);
-        (void)actuators::safe_outputs::motorCoast();
         cutoff_applied = true;
       }
     }
@@ -81,7 +83,7 @@ void Runtime::realtimeTask() {
         imu_liftoff_.reset();
         imu_liftoff_detected_.store(false, std::memory_order_release);
         resetControlSession();
-        if (fin_.telemetry().zero_valid)
+        if (fin_.telemetry().zero_reference_valid)
           (void)fin_.zeroHold();
       }
       if (snapshot.phase == mission::Phase::flight)
@@ -89,7 +91,7 @@ void Runtime::realtimeTask() {
       if (snapshot.phase == mission::Phase::descent) {
         control_active_.store(false, std::memory_order_release);
         requested_control_torque_nm_.store(0.0, std::memory_order_release);
-        if (fin_.telemetry().zero_valid)
+        if (fin_.telemetry().zero_reference_valid)
           (void)fin_.zeroHold();
       }
       if (previous_phase == mission::Phase::flight &&
@@ -99,6 +101,11 @@ void Runtime::realtimeTask() {
       }
       previous_phase = snapshot.phase;
     }
+
+    // Safety taskが直前epochのcutoff処理を完了中ならno-waitで失敗する。
+    // LiftoffDetection中の次tickで再試行し、mutex外でlatchをclearしない。
+    if (snapshot.phase == mission::Phase::liftoff_detection)
+      (void)fin_.clearPowerCutoffForNewEpoch();
 
     ICM42688::Data imu_data{};
     bool imu_sample_valid = false;
@@ -195,13 +202,9 @@ void Runtime::realtimeTask() {
       if (flight_elapsed < flight_config::kControlStartUs) {
         control_active_.store(false, std::memory_order_release);
         requested_control_torque_nm_.store(0.0, std::memory_order_release);
-        if (fin_telemetry.zero_valid)
+        if (fin_telemetry.zero_reference_valid)
           (void)fin_.zeroHold();
       } else {
-        if (!control_session_.gateEvaluated())
-          (void)control_session_.evaluateEligibility(
-              imu_sample_valid, fin_telemetry.zero_valid);
-
         const bool airspeed_valid =
             airspeed_valid_.load(std::memory_order_acquire) &&
             fresh(airspeed_sample_us_.load(std::memory_order_acquire), now,
@@ -210,25 +213,18 @@ void Runtime::realtimeTask() {
             airspeed_mps_.load(std::memory_order_acquire);
         control_session_.observeAirspeed(airspeed_valid, airspeed);
 
-        if (control_session_.referenceStarted())
-          (void)control_session_.observeGyro(now, imu_sample_valid,
-                                             roll_rate_rad_s);
-        if (!fin_telemetry.zero_valid)
-          control_session_.disablePermanently();
-
         const bool imu_fresh =
             imu_sample_valid &&
             fresh(imu_sample_us_.load(std::memory_order_acquire), now,
                   flight_config::kImuFreshUs);
-        const bool fin_fresh =
+        const bool fin_measurement_fresh =
             fin_telemetry.encoder_valid && fin_telemetry.rate_valid &&
-            fin_telemetry.zero_valid &&
+            fin_telemetry.zero_reference_valid &&
             fresh(fin_telemetry.sample_timestamp_us, now,
                   flight_config::kFinFreshUs);
-
-        // Roll Control開始後のAS5047D喪失は同一flightで再entryさせない。
-        if (control_session_.referenceStarted() && !fin_fresh)
-          control_session_.disablePermanently();
+        const bool fin_actuator_available =
+            fin_telemetry.state == actuators::FinState::zero_hold ||
+            fin_telemetry.state == actuators::FinState::roll_control;
 
         const bool lps_fresh =
             lps_valid_.load(std::memory_order_acquire) &&
@@ -238,11 +234,35 @@ void Runtime::realtimeTask() {
             ssc_valid_.load(std::memory_order_acquire) &&
             fresh(ssc_sample_us_.load(std::memory_order_acquire), now,
                   flight_config::kSscFreshUs);
+        const bool required_inputs_available =
+            control::allControlInputsAvailable(
+                {imu_fresh, fin_measurement_fresh && fin_actuator_available,
+                 lps_fresh, ssc_fresh,
+                 airspeed_valid &&
+                     airspeed > flight_config::kAirspeedPermanentStopMps});
+        const bool fin_entry_ready =
+            fin_measurement_fresh && fin_actuator_available &&
+            fin_telemetry.zero_hold_achieved;
+
+        // +8 sのone-shot gateはそのtickの全必須inputと
+        // ZeroHold成立を要求する。case別に再評価しない。
+        if (!control_session_.gateEvaluated())
+          (void)control_session_.evaluateEligibility(
+              required_inputs_available,
+              fin_telemetry.zero_hold_achieved);
+
+        if (control_session_.referenceStarted()) {
+          (void)control_session_.observeGyro(now, imu_sample_valid,
+                                             roll_rate_rad_s);
+          // entry後の必須input喪失はそのtickでlatchする。
+          // ZeroHoldへのmode移行した翌tickのachievement clearを
+          // 新しいfaultとして使わず、ongoing healthを独立判定する。
+          control_session_.enforcePostEntryHealth(required_inputs_available);
+        }
 
         bool control_applied = false;
-        if (!control_session_.permanentlyDisabled() && imu_fresh &&
-            fin_fresh && lps_fresh && ssc_fresh && airspeed_valid &&
-            airspeed > flight_config::kAirspeedPermanentStopMps) {
+        if (!control_session_.permanentlyDisabled() &&
+            required_inputs_available && fin_entry_ready) {
           if (!control_session_.referenceStarted()) {
             if (control_session_.startReference(now, roll_rate_rad_s))
               reference_capture_event_sequence_.fetch_add(
@@ -261,12 +281,17 @@ void Runtime::realtimeTask() {
                 current_state.phase == mission::Phase::flight &&
                 current_state.generation == snapshot.generation &&
                 !current_state.power_cutoff;
-            if (output.valid && same_flight &&
-                fin_.setRollControlTorque(output.torque_nm) == ESP_OK) {
+            const esp_err_t fin_result =
+                output.valid && same_flight
+                    ? fin_.setRollControlTorque(output.torque_nm)
+                    : ESP_ERR_INVALID_STATE;
+            if (fin_result == ESP_OK) {
               requested_control_torque_nm_.store(output.torque_nm,
                                                  std::memory_order_release);
               control_applied = true;
-            } else if (!output.valid) {
+            } else {
+              // invalid controlまたはactuator write faultはaccepted
+              // Controlから即時exitし、同一flightで再entryしない。
               control_session_.disablePermanently();
             }
           }
@@ -274,7 +299,7 @@ void Runtime::realtimeTask() {
 
         if (!control_applied) {
           requested_control_torque_nm_.store(0.0, std::memory_order_release);
-          if (fin_telemetry.zero_valid)
+          if (fin_telemetry.zero_reference_valid)
             (void)fin_.zeroHold();
         }
         control_active_.store(control_applied, std::memory_order_release);
@@ -291,12 +316,11 @@ void Runtime::realtimeTask() {
       control_active_.store(false, std::memory_order_release);
       requested_control_torque_nm_.store(0.0, std::memory_order_release);
       if (snapshot.phase == mission::Phase::descent &&
-          fin_telemetry.zero_valid)
+          fin_telemetry.zero_reference_valid)
         (void)fin_.zeroHold();
     }
 
     if (snapshot.power_cutoff) {
-      fin_.forceSafe();
       if (!local_logger_finished) {
         logger_.finishFlight();
         logger_finished_.store(true, std::memory_order_release);

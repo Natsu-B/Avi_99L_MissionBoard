@@ -25,17 +25,26 @@ struct RollControlOutput {
   bool valid{};
 };
 
+struct ControlInputHealth {
+  bool attitude_available{};
+  bool fin_available{};
+  bool lps_available{};
+  bool ssc_available{};
+  bool airspeed_available{};
+};
+
+[[nodiscard]] bool
+allControlInputsAvailable(const ControlInputHealth &health);
+
 class RollController {
 public:
-  RollController(const std::array<GainPoint, 7> &schedule,
-                 double torque_limit_nm);
+  explicit RollController(const std::array<GainPoint, 7> &schedule);
 
   [[nodiscard]] RollControlOutput
   compute(const RollControlInput &input) const;
 
 private:
   std::array<GainPoint, 7> schedule_{};
-  double torque_limit_nm_{};
 };
 
 class RollEstimator {
@@ -67,8 +76,11 @@ public:
                        double permanent_stop_airspeed_mps);
 
   void reset();
-  [[nodiscard]] bool evaluateEligibility(bool imu_roll_rate_available,
-                                         bool fin_zero_valid);
+  [[nodiscard]] bool evaluateEligibility(bool required_inputs_available,
+                                         bool zero_hold_achieved);
+  // Control reference capture後の必須input喪失は同一flight内での
+  // 再entryを禁止する。entry前の状態には適用しない。
+  void enforcePostEntryHealth(bool required_inputs_available);
   void observeAirspeed(bool valid, double airspeed_mps);
   [[nodiscard]] bool startReference(uint64_t timestamp_us,
                                     double roll_rate_rad_s);

@@ -112,7 +112,7 @@ Mission側ではdevice APIを薄く包み、旧MissionBoardの高位runtime型�
 
 AS5047Dからreboot後に取得できるのは1回転内の絶対角だけであり、gear ratioによって生じるencoder側の周回数は復元できない。このためFin zeroをNVSへ保存しても同じ物理0度を再構成できない。
 
-Fin zeroは毎boot後にCommandReceiveで物理Finを基準位置へ合わせ、`FinZero (0x11)`で現在の連続encoder位置を0度としてcaptureする。reboot時は必ず`zero_valid=false`へ戻す。
+Fin zeroは毎boot後にCommandReceiveで物理Finを基準位置へ合わせ、`FinZero (0x11)`で現在の連続encoder位置を0度としてcaptureする。reboot時は必ず`zero_reference_valid=false`、`zero_hold_achieved=false`へ戻す。
 
 Paraは絶対endpointを保存せず、Open/Closeを固定相対130度として実行する。
 

@@ -55,7 +55,7 @@ NVS partitionを持たず、Fin zero、AS5047D multi-turn周回数、flight elap
 
 AS5047Dは1回転内絶対角のみを返す。gear ratioによりencoder側が複数回転するため、reboot後に何周目だったかを一意に復元できない。このためFin zeroをNVSへ保存して再利用する設計は禁止する。
 
-reboot後は`zero_valid=false`とし、CommandReceiveで物理Finを基準位置へ合わせて`FinZero`を再実行する。
+reboot後は`zero_reference_valid=false`、`zero_hold_achieved=false`とし、CommandReceiveで物理Finを基準位置へ合わせて`FinZero`を再実行する。
 
 この状態は**本番投入前の未完事項**として扱う。
 
@@ -102,7 +102,17 @@ reset後はRollControlへ復帰しない。
 - 本番固定ZeroHold値がbuildへ入っていること
 - motor電気定数
 - 最大current/duty
+- 70 command補償後にもcurrent制約が再適用されること
+- 70 command -> 69 LEDC count、1024 command -> 1023 countの整数floor変換
+- high back-EMFでcurrent制約を実現不能な場合にdriveが0となり、計算値が実測値として扱われないこと
+- gearbox 6000 rpm超過のtelemetryとmotor 9800 rpm同方向加速禁止・逆方向braking許可
+- actual current/torqueを取得できない条件でmechanical restraintをair-load保持からどう識別するか。現実装はintegralを±0.034906585 rad sへ制限し、未根拠のstall timerは置かない
 - encoder/rate invalid時にmotorがHi-Zへ移ること
+- Roll更新のmapper/LEDC write失敗時に旧PWMを残さずcoastし、同一flightで再entryしないこと
+- Safety cutoff latch後に古いrealtime snapshotが非0 driveを再開できないこと
+- runtime taskの部分起動後にstartが失敗しても、Fin writerを同一mutexで直列化してmotorがsafe化されること
+- FIN0007 drive/brake modelがFIN0009/FIN0010で再現できないangle/driftの解消
+- `zero_hold_achieved`とmapper effective/current/duty/limitのCAN/SD telemetry拡張
 
 ### Para
 
@@ -142,8 +152,9 @@ reset後はRollControlへ復帰しない。
 - SSC zero
 - SSC/LPS freshness
 - airspeed算出parameter
-- RollControl gain
-- Control output torque/current limit
+- `PROVISIONAL_BRAKE_FIXED_BY_USER_DIRECTION_VALIDATION_GATE_NOT_MET`のRollControl gain scheduleを
+  production選定する前のmodel/validation gate再成立
+- actuator mapperのcurrent/voltage/duty/speed constraint
 - gyro欠落をどこまで補間可能とするか
 - AS5047D multi-turn unwrapが成立する最大sample gap / 実機Fin速度
 

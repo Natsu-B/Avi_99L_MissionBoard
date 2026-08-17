@@ -24,7 +24,7 @@
 
 FinはAS5047Dの1回転角をsampleごとにunwrapしてRAM上のmulti-turn encoder角を維持し、`kTotalGearRatio`でFin出力軸角へ変換します。Free中もAS5047D trackingを止めません。
 
-Fin zeroはNVSへ保存しません。再起動後はencoderの周回数を復元できないため`zero_valid=false`から開始し、CommandReceiveで`FinZero`をやり直します。
+Fin zeroはNVSへ保存しません。再起動後はencoderの周回数を復元できないため`zero_reference_valid=false`、`zero_hold_achieved=false`から開始し、CommandReceiveで`FinZero`をやり直します。
 
 同じtransaction ID・同じcommandの再送はcacheされた結果を返し、FinZeroの再captureやPara相対130 degの二重実行を行いません。
 
@@ -43,38 +43,61 @@ Fin zeroはNVSへ保存しません。再起動後はencoderの周回数を復�
 
 ## ZeroHold
 
-本飛行ではSpicaのfin装着characterizationを固定値として採用します。
+FIN0003/FIN0004を取得した30 kHz、10 bit、1 kHz実機controllerを、
+Spicaと同じTorqueMapper基準のrequested torque座標へ換算しています。
 
 - `Kp = 65.390941574 N m/rad`
+- `Ki = 4.577365910 N m/(rad s)`
 - `Kd = 3.269547079 N m s/rad`
-- characterization command limit `= ±600`
-- requested torque limit equivalent `= ±1.369544677734375 N m`
-- rate continuous dead-zone `= 1.0 deg/s`
-- requested-torque dead-zone/hysteresis `= none`
+- integral limit `= ±0.034906585 rad s`
+- velocity LPF `tau = 20 ms`
+- hold deadband `= 0.05 deg / 0.5 deg/s`
+- minimum active error `= 0.08 deg`
 
-演算順序はSpicaの`mission_zero_hold_step`と同じく、angle/rateへcontinuous dead-zoneを適用してPD要求torqueを計算し、最後にSpica実機試験の`±600 command`相当へclampします。AS5047D angleまたはFin rateがinvalidなtickではZeroHold出力を生成せずmotorをHi-Zへ落とし、validなrateが復帰したtickから保持を再開します。
+ZeroHoldとRollControlは同じactuator mapperを通ります。mapper後にmotionを要求し、raw commandが0より大きく70未満なら、実機で使用した70 commandへ補償します。その後にcurrent制約を再適用し、PWMを`±1024 / ±100 %`へ制限します。commandからLEDC countへの変換はFIN0003と同じ整数floorで、70 commandは69 count、1024 commandは1023 countです。back-EMF下で70 command補償がrequested torqueと逆向きの計算currentを作る場合は補償前dutyへ戻します。旧characterizationの`±600 command`と旧RollControl `1.21208 N m`はsoftware authority limitとして使用しません。±15 degより外向きのrequested torqueは禁止します。bus/back-EMF条件でcurrent制約を実現不能なら計算値をclampして隠さずdriveを0へ落とし、9800 rpm以上では同方向加速torqueを禁止します。gearbox 6000 rpm超過も内部Fin telemetryの独立limited値として保持します。`zero_hold_achieved`とmapperのeffective/current/duty/limitをCAN/SDへ外部出力するprotocol拡張は未実装です。
 
-`±1.369544677734375 N m`はSpica artifactの`0.0022825744628906255 N m/command`換算を使ったrequested-torque相当値です。fin装着試験ではactual current/torqueを直接計測していないため、実測済みなのは`±600 command`までのcommand-domain authorityであるという区別を残します。
+`zero_reference_valid`はmotor-side zero capture済み、`zero_hold_achieved`は`|angle| <= 1 deg`かつ`|rate| <= 2 deg/s`が、5 msを超えるsample gapなしで200 ms連続したことを表します。後者がControl gate条件です。どちらも左右physical finの厳密な空力0度を保証しません。invalid/stale sample、mode解除、zero recaptureではPID stateをresetし、current/duty/角度/速度制約中は積分をfreezeします。
+
+requested/effective torqueとcurrentはmapper計算座標であり、actual shaft torque/currentの実測値ではありません。
+
+FIN0006/FIN0007 FIT-derived nonlinear plantのZeroHold再検証ではこの
+baselineが50/50 caseで成立したため値を維持します。ただし実測したのは
+commandとoutput-equivalent angle/rateであり、actual current/torqueが未計測のため
+ZeroHoldも`production_selectable=false`です。
 
 ## RollControl
 
 RollControl本体は`Flight`内部の出力modeとして実装しています。
 
-- 離床+8秒でICM roll rateとFin zeroを一度だけ確認
-- +8秒でどちらかが成立しなければ、そのflightのRollControlを永久停止
-- LPS/SSC/airspeedの一時欠落は永久停止にせずZeroHold
+- 離床+8秒でICM、Fin、LPS、SSC、airspeedのhealth/freshnessと`zero_hold_achieved`を一度だけ確認
+- +8秒で必須条件が成立しなければ、そのflightのRollControlを永久停止
 - 最初に実際のRollControl条件が成立した瞬間をroll偏差0としてgyro積分開始
-- sensorが復帰しgyro積分の連続性が維持されていれば同じreferenceへControl復帰
-- gyro gapが許容上限を超えた場合はそのflightのRollControlを永久停止
-- validな対気速度が60 m/s以下になった場合はそのflightのRollControlを永久停止
-- `airspeed unavailable`は60 m/s以下として扱わない
+- Control entry後にattitude、Fin angle/rate、LPS、SSC、airspeedのどれかがinvalid/staleになるか、validな対気速度が60 m/s以下になれば即時exit
+- exit後はZeroHold（zero referenceが無効ならcoast）とし、同一flight内で再entryしない
 - Descent移行時はZeroHoldへ戻る
 
 Fin angle/rateはAS5047D encoder軸のwrapped angle/rateではなく、連続unwrapしたencoder角をtotal gear ratioで変換したFin出力軸値を使用します。
 
 SSCは同じAirData I2C busで取得し、固定zero offset、moving average、LPS静圧、SSC温度からSaint-Venant式でairspeedを計算します。runtime calibration/NVSは使用しません。
 
-**ZeroHold定数は本飛行固定値です。Roll gain、gyro bias、SSC zeroはまだ別途確定対象です。** 固定値は`src/config/flight.hpp`で管理します。
+Roll gain scheduleは100 % dutyを取得したFIN0007 drive/brake FIT-only
+effective plantに、全速度共通の`Q=diag([200,50,0.05,0.5])`、`R=1`を
+適用した7点候補です。現行Roll出力もdrive/brakeのためtopologyは一致します。
+ただしFIN0009 strict holdoutはtarget-segment angle RMSE `5.530028 deg`で
+事前固定した1 deg gateを満たさずFAILです。さらにFIN0010確認はacceleration
+R² `0.430368`、recursive rate fit `56.2689 %`、target RMSE `11.53965 deg`、
+whole-run drift `+20.26027 deg`であり、これもFAILです。FIN0010のsource SHA-256は
+CSV `cc8ac1b0bd3f7cf2af08074d313e4f194e3daacc84d9254f888c5a3342df0254`、metadata
+`7d7c41622715cc91fe334aa674fc809169731fd719521320f4d6030d1c7db177`です。
+
+**statusは`PROVISIONAL_BRAKE_FIXED_BY_USER_DIRECTION_VALIDATION_GATE_NOT_MET / NO_GO`、
+`production_selectable=false`です。** ユーザ指定でBrake候補をfirmwareへ固定しますが、
+strict holdoutまたはFIN0010からgain/modelをretuneしておらず、flight qualificationとは
+扱いません。Spica FIN0010 revision artifact SHA-256は
+`2eb8ac6f6b94fb99b22417546ef437c557b676c56545e0721e4b15c94dff25b1`、
+consumed marker SHA-256は
+`4cedffcdb8f389116bfe10c8a6126ca34e64bff2b6cc04898889b79f73fa09c2`、
+exact値は`src/config/flight.hpp`で管理します。
 
 ## Logging
 
@@ -94,7 +117,7 @@ log flagsにはIMU/LPS/SSC/airspeed validity、Control active、Control永久停
 
 `Avi_ESP_Libs`は次のrevisionを使用します。
 
-`122b4bebdfc89eaef364ff59b3bcd18010f83d5e`
+`2562ef05d3f7673a5681d8a3739c874f95811c73`
 
 ## Build
 
@@ -112,7 +135,8 @@ ctest --test-dir host_test/build --output-on-failure
 
 ## 飛行前に残るもの
 
-- SpicaでRollControl gain / authorityを確定
+- FIN0009/FIN0010で顕在化したactuator model angle/drift errorを解消し、
+  RollControl scheduleを実機qualification
 - 実機でgyro bias / SSC zeroを確定
 - AS5047Dの連続unwrapが実機最大Fin速度・想定sample gapで周回誤認しないことを確認
 - Fin motor極性・電気定数が実機と固定configで一致することを確認

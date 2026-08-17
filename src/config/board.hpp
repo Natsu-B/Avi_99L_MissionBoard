@@ -42,8 +42,8 @@ constexpr uint32_t kAirDataI2cFrequencyHz = 300'000;
 
 constexpr gpio_num_t kMotorIn2 = GPIO_NUM_38;
 constexpr gpio_num_t kMotorIn1 = GPIO_NUM_39;
-// 実機Zero Hold characterizationと同じPWM周波数を使用する。
-constexpr uint32_t kMotorPwmFrequencyHz = 20'000;
+// FIN0003/FIN0004実機characterizationと同じ30 kHzに固定する。
+constexpr uint32_t kMotorPwmFrequencyHz = 30'000;
 
 constexpr gpio_num_t kAux5vEnable = GPIO_NUM_40;
 constexpr gpio_num_t kParaRx = GPIO_NUM_41;

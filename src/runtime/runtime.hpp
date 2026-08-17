@@ -29,6 +29,8 @@ namespace runtime {
 class Runtime {
 public:
   [[nodiscard]] esp_err_t start();
+  // task生成が途中で失敗しても、Fin writerと競合せず全出力をsafe化する。
+  void forceSafeAfterStartFailure();
 
 private:
   struct ActuatorCommand {
@@ -83,9 +85,7 @@ private:
       flight_config::kSscZeroOffsetPa,
       flight_config::kDifferentialPressureNegativeTolerancePa,
       flight_config::kDifferentialPressureMovingAverageSamples};
-  control::RollController roll_controller_{
-      flight_config::kRollGainSchedule,
-      flight_config::kRollControlTorqueLimitNm};
+  control::RollController roll_controller_{flight_config::kRollGainSchedule};
   control::FlightControlSession control_session_{
       flight_config::kGyroIntegrationMaximumGapUs,
       flight_config::kAirspeedPermanentStopMps};

@@ -308,7 +308,8 @@ void Runtime::canTask() {
           imu_valid_.load(std::memory_order_acquire));
       message.fin_angle_raw =
           protocol::encodeFinAngle(fin.angle_deg,
-                                   fin.encoder_valid && fin.zero_valid);
+                                   fin.encoder_valid &&
+                                       fin.zero_reference_valid);
       message.fin_rate_raw =
           protocol::encodeFinRate(fin.rate_deg_s,
                                   fin.encoder_valid && fin.rate_valid);

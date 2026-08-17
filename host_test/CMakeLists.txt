@@ -9,6 +9,7 @@ add_executable(minimal_tests
   ../src/protocol/command_cache.cpp
   ../src/control/roll_control.cpp
   ../src/control/zero_hold.cpp
+  ../src/actuators/fin_torque_mapper.cpp
   ../src/sensors/airspeed.cpp
 )
 target_include_directories(minimal_tests PRIVATE ../src)

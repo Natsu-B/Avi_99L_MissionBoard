@@ -16,13 +16,17 @@ bool finiteInput(const RollControlInput &input) {
 
 } // namespace
 
-RollController::RollController(const std::array<GainPoint, 7> &schedule,
-                               double torque_limit_nm)
-    : schedule_(schedule), torque_limit_nm_(torque_limit_nm) {}
+bool allControlInputsAvailable(const ControlInputHealth &health) {
+  return health.attitude_available && health.fin_available &&
+         health.lps_available && health.ssc_available &&
+         health.airspeed_available;
+}
+
+RollController::RollController(const std::array<GainPoint, 7> &schedule)
+    : schedule_(schedule) {}
 
 RollControlOutput RollController::compute(const RollControlInput &input) const {
-  if (!finiteInput(input) || !std::isfinite(torque_limit_nm_) ||
-      torque_limit_nm_ <= 0.0)
+  if (!finiteInput(input))
     return {};
 
   for (std::size_t index = 0; index < schedule_.size(); ++index) {
@@ -66,8 +70,8 @@ RollControlOutput RollController::compute(const RollControlInput &input) const {
   if (!std::isfinite(torque))
     return {};
 
-  const double limited = std::clamp(torque, -torque_limit_nm_, torque_limit_nm_);
-  return {limited, limited != torque, true};
+  // software authorityをここでclampせず、ZeroHoldと共通のactuator mapperへ渡す。
+  return {torque, false, true};
 }
 
 RollEstimator::RollEstimator(uint64_t maximum_gap_us)
@@ -135,14 +139,20 @@ void FlightControlSession::reset() {
   permanently_disabled_ = false;
 }
 
-bool FlightControlSession::evaluateEligibility(bool imu_roll_rate_available,
-                                               bool fin_zero_valid) {
+bool FlightControlSession::evaluateEligibility(bool required_inputs_available,
+                                               bool zero_hold_achieved) {
   if (gate_evaluated_)
     return !permanently_disabled_;
   gate_evaluated_ = true;
-  if (!imu_roll_rate_available || !fin_zero_valid)
+  if (!required_inputs_available || !zero_hold_achieved)
     permanently_disabled_ = true;
   return !permanently_disabled_;
+}
+
+void FlightControlSession::enforcePostEntryHealth(
+    bool required_inputs_available) {
+  if (referenceStarted() && !required_inputs_available)
+    permanently_disabled_ = true;
 }
 
 void FlightControlSession::observeAirspeed(bool valid, double airspeed_mps) {

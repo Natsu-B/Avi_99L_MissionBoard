@@ -28,6 +28,14 @@ void Runtime::resetControlSession() {
   requested_control_torque_nm_.store(0.0, std::memory_order_release);
 }
 
+void Runtime::forceSafeAfterStartFailure() {
+  // start()は複数taskを順次起動する。部分起動後に失敗した場合も、
+  // Fin内のatomic latchと同一mutexを通して旧snapshotからの再driveを防ぐ。
+  fin_.latchPowerCutoff();
+  (void)actuators::safe_outputs::setAux5v(false);
+  (void)actuators::safe_outputs::setParaPower(false);
+}
+
 esp_err_t Runtime::start() {
   fin_command_queue_ = xQueueCreate(4, sizeof(ActuatorCommand));
   para_command_queue_ = xQueueCreate(4, sizeof(ActuatorCommand));
