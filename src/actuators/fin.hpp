@@ -26,7 +26,8 @@ struct FinTelemetry {
   bool zero_hold_achieved{};
   double angle_deg{};
   double rate_deg_s{};
-  // 以下はTorqueMapperのcommand/calculation座標であり実測torque/currentではない。
+  // RollControlはTorqueMapper値、ZeroHoldはcommand-domainのNm-equivalent値。
+  // いずれも実測torque/currentではない。
   double requested_torque_nm{};
   double effective_torque_nm{};
   double estimated_motor_current_a{};
@@ -78,13 +79,14 @@ public:
 private:
   [[nodiscard]] esp_err_t initializeEncoderTransport();
   [[nodiscard]] esp_err_t initializeMotor();
+  [[nodiscard]] esp_err_t setMotorPwmFrequency(uint32_t frequency_hz);
   [[nodiscard]] esp_err_t driveCommand(int16_t command);
   [[nodiscard]] esp_err_t driveBrakeCommand(int16_t command);
   [[nodiscard]] esp_err_t coast();
-  [[nodiscard]] esp_err_t applyOutputTorque(double torque_nm,
-                                            double angle_rad,
-                                            double rate_rad_s,
-                                            bool motion_requested);
+  [[nodiscard]] esp_err_t applyRollControlTorque(double torque_nm,
+                                                 double angle_rad,
+                                                 double rate_rad_s,
+                                                 bool motion_requested);
   [[nodiscard]] esp_err_t applyZeroHold(uint64_t sample_timestamp_us,
                                         double angle_rad, double rate_rad_s,
                                         double dt_s);
@@ -93,12 +95,14 @@ private:
   void consumeControllerResetRequest();
   void updateZeroHoldAchievement(uint64_t sample_timestamp_us,
                                  double angle_rad, double rate_rad_s);
+  void resetOutputTelemetry();
   void forceSafeLocked();
 
   SPICREATE spi_{};
   AS5047D encoder_{};
   SemaphoreHandle_t encoder_mutex_{};
   std::atomic<bool> motor_initialized_{};
+  uint32_t motor_pwm_frequency_hz_{};
   FinDriveInterlock drive_interlock_{};
 
   std::atomic<FinState> state_{FinState::unavailable};
@@ -144,7 +148,6 @@ private:
   double requested_roll_torque_nm_{};
   control::ZeroHoldState zero_hold_controller_state_{};
   control::ZeroHoldAchievementState zero_hold_achievement_state_{};
-  bool zero_hold_integration_allowed_{true};
   uint64_t last_zero_hold_sample_us_{};
 };
 

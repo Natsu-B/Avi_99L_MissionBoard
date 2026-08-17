@@ -69,9 +69,9 @@ Fin actuator modeは以下。
 - `zero_hold`
 - `roll_control`
 
-ZeroHoldとRollControlは同じAS5047D sample、Fin rate、motor electric model、30 kHz PWM driverを共有する。RollControllerはGPIO/PWMを直接操作せず、Fin actuatorへrequested torqueだけを渡す。旧`1.21208 N m`software clampは使用せず、共通mapperがcurrent、bus voltage、minimum 70 command補償、`±1024 / ±100 %`、gearbox 6000 rpmとmotor hard 9800 rpmの条件を適用する。requested torque、mapper上のeffective torque、計算current、duty、limit状態は内部Fin telemetryで分離する。これらは実測torque/currentではなく、CAN/SDへの外部露出は未実装である。
+RollControlだけがmainの30 kHz torque mapperとdrive/brakeを使用する。RollControllerはGPIO/PWMを直接操作せず、Fin actuatorへrequested torqueだけを渡す。mapperはcurrent、bus voltage、minimum 70 command補償、`±1024 / ±100 %`、gearbox 6000 rpmとmotor hard 9800 rpmの条件を適用する。requested torque、mapper上のeffective torque、計算current、duty、limit状態は内部Fin telemetryで分離する。これらは実測torque/currentではなく、CAN/SDへの外部露出は未実装である。
 
-mapper出力はFIN0003と同じ整数floorで10 bit commandへ量子化する。ZeroHoldは同定時と同じdrive/coast、Rollはshort-brake相を持つdrive/brakeで駆動する。Roll gainのFIT run FIN0007もdrive/brakeでありtopologyは一致するが、FIN0009/FIN0010 validation gateが不成立のため現行gainをflight-qualifiedとは扱わない。
+ZeroHoldは`feat/zero-hold-nm-pid`と同じ20 kHz command-domain PID／drive-coast経路であり、torque mapperを通らない。mode切替時は一度両入力をLOWにしてPWM周波数を切り替える。Roll gainのFIT run FIN0007はdrive/brakeでtopologyは一致するが、FIN0009/FIN0010 validation gateが不成立のため現行gainをflight-qualifiedとは扱わない。
 
 ±15 deg境界より外向きのtorqueは0へ抑制し、中心へ戻すtorqueは許可する。9800 rpm以上でも同方向加速torqueだけを0へ抑制し、逆方向brakingは許可する。bus voltage内でcurrent制約を実現できない駆動候補は計算currentをclampして隠さず、`current_limit_unrealizable`を立ててdriveを0へ落とす。minimum 70 command補償がback-EMF下でrequested torqueと逆向きのcurrentを作る場合は補償前dutyへ戻し、最終dutyでもrequested torque方向を実現できなければ`torque_direction_unrealizable`としてdriveを0へ落とす。
 

@@ -81,7 +81,7 @@ AS5047Dのmulti-turn周回数はsensor単体からreboot後に復元できない
 | IN1 | 39 |
 | IN2 | 38 |
 
-- PWM: 30 kHz
+- PWM: ZeroHold 20 kHz / RollControl 30 kHz
 - 1 motor only
 
 ### Parachute STS3215
@@ -133,27 +133,26 @@ Open負方向を「反時計回り」、Close正方向を「時計回り」と�
 
 ## 5. Fin ZeroHold constants
 
-30 kHz、10 bit、1 kHzで取得したFIN0003/FIN0004の実機controllerを、Spica TorqueMapper基準のrequested torque座標へ換算した値をbaselineとする。FIN0006/FIN0007 FIT-derived nonlinear plantの再検証で50/50 caseが成立したため値を維持するが、actual current/torqueが未計測のため`production_selectable=false`を維持する。
-
-PID、20 ms速度LPF、deadband、minimum active errorは実機controllerと同じ構造を使う。characterization用`±600 command`は本番software authority limitへ流用せず、ZeroHold/RollControlとも共通mapper後のcurrent、bus voltage、`±1024 / ±100 %`、±15 deg outward blockで制限する。
+`feat/zero-hold-nm-pid`で実機成立した20 kHz、10 bit、1 kHzのcommand-domain controllerをbaselineとする。ZeroHoldはこの経路を直接使用し、RollControl用TorqueMapperを通さない。
 
 | item | value | status |
 |---|---:|---|
-| Kp | 65.390941574 N m/rad | baseline |
-| Ki | 4.577365910 N m/(rad s) | baseline |
-| Kd | 3.269547079 N m/(rad/s) | baseline |
-| integral limit | ±0.034906585 rad s | 実機controller換算 |
+| Kp | 500 command/deg | 実機controller |
+| Ki | 35 command/(deg s) | 実機controller |
+| Kd | 25 command/(deg/s) | 実機controller |
+| integral limit | ±2 deg s | 実機controller |
 | velocity LPF tau | 20 ms | 実機controller |
 | hold deadband | 0.05 deg / 0.5 deg/s | 実機controller |
 | minimum active error | 0.08 deg | 実機controller |
-| characterization command limit | ±600 | 取得時のみ、本番limitではない |
-| N m per command | 0.0022825744628906255 | TorqueMapper換算 |
-| minimum active command | 70 | mapper後PWM補償 |
+| ZeroHold command limit | ±800 | 実機controller |
+| N m per command | 0.0022825744628906255 | telemetry互換換算 |
+| minimum active command | 70 | ZeroHold PWM補償 |
 | command full scale | 1024 | 10 bit command座標 |
-| PWM frequency | 30 kHz | FIN0003/FIN0004と本番で固定 |
-| motor resistance | 3.48 ohm | TorqueMapper固定値 |
-| torque constant | 0.00855 N m/A | TorqueMapper固定値 |
-| speed constant | 1120 rpm/V | TorqueMapper固定値 |
+| ZeroHold PWM frequency | 20 kHz | command-domain drive/coast |
+| RollControl PWM frequency | 30 kHz | torque mapper drive/brake |
+| motor resistance | 3.48 ohm | RollControl TorqueMapper固定値 |
+| torque constant | 0.00855 N m/A | RollControl TorqueMapper固定値 |
+| speed constant | 1120 rpm/V | RollControl TorqueMapper固定値 |
 | gear ratio | 176.175 | 機構固定値 |
 | drivetrain efficiency | 0.60 | TorqueMapper換算仮定 |
 | bus voltage | 9.0 V | fin装着換算条件 |
@@ -165,17 +164,17 @@ PID、20 ms速度LPF、deadband、minimum active errorは実機controllerと同�
 
 `gear ratio = 176.175`はencoder/motor側角度をFin出力軸角へ変換するために使用する。ZeroHold/RollControlへ渡すFin angle/rateはgear ratio変換後の値とする。
 
-Spicaのfin装着characterizationで直接観測したのはcommandとoutput-equivalent angle/rateである。requested/effective torque、current、drivetrain efficiencyはmapper計算値であり、actual motor currentまたはactual shaft torqueの実測値ではない。`estimated_motor_current`は駆動候補dutyからの計算値を数値上clampせず保持し、bus voltage範囲で2.2 A制約を実現できない場合は`current_limit_unrealizable`としてdriveを0へ落とす。runtime command/NVSから値を変更する仕組みは設けない。
+Spicaのfin装着characterizationで直接観測したのはcommandとoutput-equivalent angle/rateである。RollControlのrequested/effective torque、current、drivetrain efficiencyはmapper計算値であり、actual motor currentまたはactual shaft torqueの実測値ではない。runtime command/NVSから値を変更する仕組みは設けない。
 
-AS5047D angle/rateがinvalidまたはstale、dtが非正または上限外のtickでは要求torqueを生成せずmotorをHi-Zとし、PID stateと`zero_hold_achieved`をresetする。current/duty/角度/速度制約を検出したtickは、そのtickで追加したintegral成分だけをrollbackして速度LPF stateを維持する。integralは常に±0.034906585 rad s内へ制限する。back-EMFにより70 command補償後の計算currentがrequested torqueと逆向きになる場合は補償前dutyへ戻し、最終dutyでもtorque方向を実現できなければdriveを0へ落とす。
+AS5047D angle/rateがinvalidまたはstale、dtが非正または上限外のtickではcommandを生成せずmotorをHi-Zとし、PID stateと`zero_hold_achieved`をresetする。積分は常に±2 deg s内へ制限する。
 
 ZeroHold PID、成立時間、encoder unwrapのnon-atomic stateは1 kHz realtime taskだけが更新する。Recovery taskはatomic reset requestとinvalid flagを発行し、motorをcoastしてからtransportを復旧する。realtime側はencoder mutexを待たずに取得できたtickだけsensor readからdrive反映までを完結し、取得できないtickはstateをresetしてdriveを生成しない。FinFree、force-safe、Recovery、Safety cutoffも同じmutexでmotor writerを直列化する。Safety taskはatomic inhibitを先にlatchし、進行中writerの終了後にmotorをcoastするため、古いrealtime snapshotがcutoff後に非0 driveを再開できない。
 
-command-to-countはFIN0003の整数floorを再現し、70 commandを69 count、1024 commandを1023 countへ変換する。ZeroHold出力はFIN0003と同じdrive/coastである。Roll出力はdrive/brakeであり、gain候補のFIT run FIN0007とtopologyは一致する。ただしFIN0009 strict holdoutとFIN0010確認が共に事前固定gateを満たさないため、`PROVISIONAL_BRAKE_FIXED_BY_USER_DIRECTION_VALIDATION_GATE_NOT_MET / NO_GO`、`production_selectable=false`とする。
+command-to-countは整数floorを使用し、70 commandを69 count、1024 commandを1023 countへ変換する。ZeroHold出力は20 kHz drive/coast、Roll出力は30 kHz drive/brakeであり、mode切替前に両入力をLOWへ落としてtimer周波数を変更する。Roll gain候補のFIT run FIN0007はdrive/brakeでtopologyは一致する。ただしFIN0009 strict holdoutとFIN0010確認が共に事前固定gateを満たさないため、`PROVISIONAL_BRAKE_FIXED_BY_USER_DIRECTION_VALIDATION_GATE_NOT_MET / NO_GO`、`production_selectable=false`とする。
 
 FIN0010 revision artifact SHA-256は`2eb8ac6f6b94fb99b22417546ef437c557b676c56545e0721e4b15c94dff25b1`、read-once consumed marker SHA-256は`4cedffcdb8f389116bfe10c8a6126ca34e64bff2b6cc04898889b79f73fa09c2`である。
 
-±15 degの外向きcommand禁止はZeroHold authority変更後も維持する。outward判定と9800 rpmでの加速禁止はPWM電圧符号でなくrequested torque方向で行い、back-EMFでPWM符号が反転するbrakingを誤って禁止しない。gearbox 6000 rpm超過は独立してtelemetryへ残す。
+±15 degの外向きcommand禁止は両modeで維持する。RollControlの9800 rpm加速禁止はrequested torque方向で判定し、逆向きbrakingを許可する。
 
 `zero_reference_valid`はzero capture transactionの成立、`zero_hold_achieved`はmotor-side/output-equivalentで`|angle| <= 1 deg`かつ`|rate| <= 2 deg/s`が200 ms連続したことを表す。physical left/right finの厳密な0 degを意味しない。
 
