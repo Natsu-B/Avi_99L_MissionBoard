@@ -59,7 +59,8 @@ constexpr double kGearboxContinuousSpeedRpm = 6'000.0;
 constexpr double kMotorMaximumDuty = 1.0;
 constexpr uint16_t kMotorCommandFullScale = 1024;
 constexpr uint16_t kMotorMinimumActiveCommand = 70;
-constexpr bool kPositiveTorqueUsesIn1 = true;
+// 実機の動翼回転方向に合わせ、正トルクはIN2側を駆動する。
+constexpr bool kPositiveTorqueUsesIn1 = false;
 constexpr double kFinOutwardCommandLimitDeg = 15.0;
 
 // Control用の個体固定値。runtime calibration/NVSでは変更しない。
