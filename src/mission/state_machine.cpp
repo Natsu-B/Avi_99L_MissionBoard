@@ -17,6 +17,31 @@ bool StateMachine::startSequence() {
   return true;
 }
 
+bool StateMachine::cancelSequence() {
+  // 離床確定処理とCancelを同時に成功させない。
+  bool unclaimed = false;
+  if (!liftoff_claimed_.compare_exchange_strong(
+          unclaimed, true, std::memory_order_acq_rel,
+          std::memory_order_acquire))
+    return false;
+
+  Phase expected = Phase::liftoff_detection;
+  if (!phase_.compare_exchange_strong(expected, Phase::command_receive,
+                                      std::memory_order_acq_rel)) {
+    liftoff_claimed_.store(false, std::memory_order_release);
+    return false;
+  }
+
+  // Cancel前のattemptに属する遅延eventを無効化する。
+  generation_.fetch_add(1, std::memory_order_acq_rel);
+  liftoff_valid_.store(false, std::memory_order_release);
+  liftoff_us_.store(0, std::memory_order_release);
+  deployment_started_.store(false, std::memory_order_release);
+  power_cutoff_.store(false, std::memory_order_release);
+  liftoff_claimed_.store(false, std::memory_order_release);
+  return true;
+}
+
 bool StateMachine::reportLiftoff(uint64_t detected_us) {
   bool unclaimed = false;
   if (!liftoff_claimed_.compare_exchange_strong(
