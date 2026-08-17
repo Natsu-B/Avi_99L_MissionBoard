@@ -59,7 +59,8 @@ constexpr double kGearboxContinuousSpeedRpm = 6'000.0;
 constexpr double kMotorMaximumDuty = 1.0;
 constexpr uint16_t kMotorCommandFullScale = 1024;
 constexpr uint16_t kMotorMinimumActiveCommand = 70;
-constexpr bool kPositiveTorqueUsesIn1 = true;
+// 実機の動翼回転方向に合わせ、正トルクはIN2側を駆動する。
+constexpr bool kPositiveTorqueUsesIn1 = false;
 constexpr double kFinOutwardCommandLimitDeg = 15.0;
 
 // Control用の個体固定値。runtime calibration/NVSでは変更しない。
@@ -97,7 +98,7 @@ inline constexpr char kRollGainSourceConsumedMarkerSha256[] =
     "4cedffcdb8f389116bfe10c8a6126ca34e64bff2b6cc04898889b79f73fa09c2";
 inline constexpr char kRollGainConfirmationRun[] = "FIN0010";
 inline constexpr char kRollGainConfirmationCsvSha256[] =
-    "cc8ac1b0bd3f7cf2af08074d313e4f194e3daacc84d9254f888c5a3342df0254";
+    "cc8ac1b0bd3f6af787afb8617ac47f8a7c4a8775";
 inline constexpr char kRollGainConfirmationMetadataSha256[] =
     "7d7c41622715cc91fe334aa674fc809169731fd719521320f4d6030d1c7db177";
 constexpr bool kRollGainStrictHoldoutPassed = false;
