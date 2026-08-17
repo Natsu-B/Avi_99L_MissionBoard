@@ -34,6 +34,7 @@ enum class WireMissionState : uint8_t {
 
 enum class CommandCode : uint8_t {
   start_sequence = 0x01,
+  cancel_sequence = 0x02,
   fin_free = 0x10,
   fin_zero = 0x11,
   fin_hold = 0x13,
