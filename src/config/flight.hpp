@@ -64,7 +64,9 @@ constexpr double kFinOutwardCommandLimitDeg = 15.0;
 // Control用の個体固定値。runtime calibration/NVSでは変更しない。
 // TODO(HW_TEST): 飛行個体のcharacterization値へ置換する。
 constexpr double kGyroRollBiasDps = 0.0;
-constexpr double kSscZeroOffsetPa = 0.0;
+// 2026-08-17の飛行個体実測値。+5V投入後5秒待機し、
+// 500 sample x 3 runのtrimmed mean平均から固定する。
+constexpr double kSscZeroOffsetPa = 86.877;
 constexpr double kDifferentialPressureNegativeTolerancePa = 5.0;
 constexpr std::size_t kDifferentialPressureMovingAverageSamples = 8;
 constexpr double kPitotPressureCorrectionCoefficient = 0.92;
