@@ -75,6 +75,9 @@ void Runtime::realtimeTask() {
   TickType_t wake = xTaskGetTickCount();
   mission::Phase previous_phase = mission::Phase::command_receive;
   bool local_logger_finished = false;
+  // TEST ONLY: 起動時は自動Controlするが、手動Hold/Free成功後は
+  // Runtimeから再度modeを書き換えず、明示された手動状態を維持する。
+  bool bench_control_enabled = true;
 
   for (;;) {
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
@@ -175,15 +178,26 @@ void Runtime::realtimeTask() {
     ActuatorCommand fin_command{};
     while (xQueueReceive(fin_command_queue_, &fin_command, 0) == pdTRUE) {
       esp_err_t result = ESP_ERR_INVALID_ARG;
+      const bool hold_command =
+          fin_command.command ==
+          static_cast<uint8_t>(protocol::CommandCode::fin_hold);
+      const bool free_command =
+          fin_command.command ==
+          static_cast<uint8_t>(protocol::CommandCode::fin_free);
       if (fin_command.command ==
           static_cast<uint8_t>(protocol::CommandCode::fin_zero)) {
         result = fin_.setZero();
-      } else if (fin_command.command ==
-                 static_cast<uint8_t>(protocol::CommandCode::fin_hold)) {
+      } else if (hold_command) {
         result = fin_.zeroHold();
-      } else if (fin_command.command ==
-                 static_cast<uint8_t>(protocol::CommandCode::fin_free)) {
+      } else if (free_command) {
         result = fin_.free();
+      }
+
+      // TEST ONLY: Hold/Freeがacceptedされた後に自動Controlで上書きしない。
+      // 再度ベンチControlを有効化するには再起動する。
+      if (result == ESP_OK && (hold_command || free_command)) {
+        bench_control_enabled = false;
+        resetControlSession();
       }
 
       pushResult({fin_command.transaction_id, fin_command.command,
@@ -218,7 +232,7 @@ void Runtime::realtimeTask() {
     const bool bench_inputs_available =
         imu_fresh && fin_measurement_fresh && fin_actuator_available;
 
-    if (!snapshot.power_cutoff) {
+    if (!snapshot.power_cutoff && bench_control_enabled) {
       if (control_session_.permanentlyDisabled())
         resetControlSession();
 
