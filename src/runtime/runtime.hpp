@@ -111,7 +111,6 @@ private:
   std::atomic<bool> ssc_valid_{};
   std::atomic<uint64_t> ssc_sample_us_{};
   std::atomic<double> differential_pressure_pa_{};
-  std::atomic<double> ssc_temperature_c_{};
 
   std::atomic<bool> airspeed_valid_{};
   std::atomic<uint64_t> airspeed_sample_us_{};
