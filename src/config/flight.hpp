@@ -98,7 +98,7 @@ inline constexpr char kRollGainSourceConsumedMarkerSha256[] =
     "4cedffcdb8f389116bfe10c8a6126ca34e64bff2b6cc04898889b79f73fa09c2";
 inline constexpr char kRollGainConfirmationRun[] = "FIN0010";
 inline constexpr char kRollGainConfirmationCsvSha256[] =
-    "cc8ac1b0bd3f6af787afb8617ac47f8a7c4a8775";
+    "cc8ac1b0bd3f7cf2af08074d313e4f194e3daacc84d9254f888c5a3342df0254";
 inline constexpr char kRollGainConfirmationMetadataSha256[] =
     "7d7c41622715cc91fe334aa674fc809169731fd719521320f4d6030d1c7db177";
 constexpr bool kRollGainStrictHoldoutPassed = false;
