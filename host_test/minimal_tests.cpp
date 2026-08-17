@@ -109,13 +109,14 @@ int main() {
   const double accumulated = unwrapped - 350.0 * kDegToRad;
   assert(std::abs(accumulated - 4.0 * kPi) < 1.0e-12);
 
-  // Encoder軸が何周しても、gear ratioで出力軸Fin角へ変換する。
+  // 実機取付ではencoder正方向とFin正方向が逆向きである。
   const double two_encoder_turns = 4.0 * kPi;
   const double fin_angle = actuators::fin_kinematics::encoderToFinRadians(
       two_encoder_turns, flight_config::kTotalGearRatio);
-  assert(std::abs(fin_angle -
+  assert(std::abs(fin_angle +
                   two_encoder_turns / flight_config::kTotalGearRatio) <
          1.0e-15);
+  static_assert(!flight_config::kPositiveTorqueUsesIn1);
 
   // +8秒gateは必須inputまたはZeroHold成立が欠ければ永久停止する。
   control::FlightControlSession gate_ok{
@@ -488,9 +489,7 @@ int main() {
       flight_config::kMotorMinimumActiveCommand,
       flight_config::kPositiveTorqueUsesIn1};
 
-  // Spica Scripts/mission_99l_torque_mapper.m
-  // SHA256=c93eda5f5ba3c6002085300cb55c290cfdb4b0c03c581337e2ad41dbb9a9ff2b
-  // から得た代表/境界vectorと、realizable dutyを固定する。
+  // Spicaの論理torque vectorに対し、実機IN2正極性のhardware duty符号を固定する。
   struct MapperGoldenCase {
     double requested_torque_nm;
     double rate_rad_s;
@@ -499,14 +498,14 @@ int main() {
     double duty_signed;
   };
   constexpr std::array<MapperGoldenCase, 10> mapper_golden_cases{{
-      {0.001, 0.0, 0.0, true, 0.068359375},
-      {-0.001, 0.0, 0.0, true, -0.068359375},
-      {0.001, -0.1, 0.0, true, -0.016535933463469304},
-      {10.0, -5.0, 0.0, true, 0.016168985142420784},
-      {100.0, 0.0, 0.0, true, 0.85066666666666668},
-      {100.0, 5.0, 0.0, true, 1.0},
+      {0.001, 0.0, 0.0, true, -0.068359375},
+      {-0.001, 0.0, 0.0, true, 0.068359375},
+      {0.001, -0.1, 0.0, true, 0.016535933463469304},
+      {10.0, -5.0, 0.0, true, -0.016168985142420784},
+      {100.0, 0.0, 0.0, true, -0.85066666666666668},
+      {100.0, 5.0, 0.0, true, -1.0},
       {1.0, -5.0, 15.0 * kDegToRad, true, 0.0},
-      {-1.0, 5.0, 15.0 * kDegToRad, true, 0.68047751450862737},
+      {-1.0, 5.0, 15.0 * kDegToRad, true, -0.68047751450862737},
       {-0.1, 20.0, 0.0, true, 0.0},
       {0.1, 7.0, 0.0, true, 0.0},
   }};
@@ -534,7 +533,7 @@ int main() {
   assert(negative_minimum_command.valid &&
          negative_minimum_command.minimum_command_applied);
   assert(negative_minimum_command.command_magnitude == 70);
-  assert(negative_minimum_command.duty_signed < 0.0);
+  assert(negative_minimum_command.duty_signed > 0.0);
   const auto minimum_direction_reversal = actuators::mapFinOutputTorque(
       {0.001, 0.0, -0.1, true}, mapper_config);
   assert(minimum_direction_reversal.valid);
@@ -585,7 +584,7 @@ int main() {
       {-1.0, 15.0 * kDegToRad, 5.0, true}, mapper_config);
   assert(inward_braking.valid && !inward_braking.outward_inhibited);
   assert(!inward_braking.coast_required);
-  assert(inward_braking.duty_signed > 0.0);
+  assert(inward_braking.duty_signed < 0.0);
   assert(inward_braking.effective_torque_nm < 0.0);
 
   // 高back-EMFでbus voltage内にcurrent制約を実現できない場合、
