@@ -15,6 +15,8 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegToRad = kPi / 180.0;
 constexpr uint8_t kImuFailureThreshold = 3U;
+// 動翼角度確認用ブランチ専用。静止ベンチでも制御ゲインを選べるよう固定値を使う。
+constexpr double kBenchControlAirspeedMps = 100.0;
 
 protocol::CommandReason reasonForEsp(esp_err_t result) {
   if (result == ESP_OK)
@@ -193,131 +195,87 @@ void Runtime::realtimeTask() {
 
     snapshot = state_.snapshot();
     const auto fin_telemetry = fin_.telemetry();
+    const double roll_rate_rad_s = corrected_roll_rate_dps * kDegToRad;
 
-    if (snapshot.phase == mission::Phase::flight && snapshot.liftoff_valid &&
-        !snapshot.power_cutoff) {
-      const uint64_t flight_elapsed = elapsed(snapshot, now);
-      const double roll_rate_rad_s = corrected_roll_rate_dps * kDegToRad;
+    // TEST ONLY: 状態遷移、離床時刻、Pitot/LPS/SSC、+8 s gateを無視し、
+    // COMMAND_RECEIVEを含む全phaseでroll controlを試す。
+    // ただしpower cutoff、IMU、encoder、zero基準は安全上バイパスしない。
+    const bool imu_fresh =
+        imu_sample_valid &&
+        fresh(imu_sample_us_.load(std::memory_order_acquire), now,
+              flight_config::kImuFreshUs);
+    const bool fin_measurement_fresh =
+        fin_telemetry.encoder_valid && fin_telemetry.rate_valid &&
+        fin_telemetry.zero_reference_valid &&
+        fresh(fin_telemetry.sample_timestamp_us, now,
+              flight_config::kFinFreshUs);
+    const bool fin_actuator_available =
+        fin_telemetry.state == actuators::FinState::zero_hold ||
+        fin_telemetry.state == actuators::FinState::roll_control;
+    const bool fin_entry_ready =
+        fin_measurement_fresh && fin_actuator_available &&
+        fin_telemetry.zero_hold_achieved;
+    const bool bench_inputs_available =
+        imu_fresh && fin_measurement_fresh && fin_actuator_available;
 
-      if (flight_elapsed < flight_config::kControlStartUs) {
-        control_active_.store(false, std::memory_order_release);
+    if (!snapshot.power_cutoff) {
+      if (control_session_.permanentlyDisabled())
+        resetControlSession();
+
+      if (!control_session_.gateEvaluated() && fin_entry_ready)
+        (void)control_session_.evaluateEligibility(bench_inputs_available, true);
+
+      if (control_session_.referenceStarted())
+        (void)control_session_.observeGyro(now, imu_sample_valid,
+                                           roll_rate_rad_s);
+
+      bool control_applied = false;
+      if (!control_session_.permanentlyDisabled() && bench_inputs_available &&
+          fin_entry_ready) {
+        if (!control_session_.referenceStarted()) {
+          if (control_session_.startReference(now, roll_rate_rad_s))
+            reference_capture_event_sequence_.fetch_add(
+                1U, std::memory_order_acq_rel);
+        }
+
+        if (control_session_.referenceStarted() &&
+            control_session_.estimatorValid()) {
+          const control::RollControlInput input{
+              control_session_.rollDeviationRad(),
+              fin_telemetry.angle_deg * kDegToRad, roll_rate_rad_s,
+              fin_telemetry.rate_deg_s * kDegToRad,
+              kBenchControlAirspeedMps};
+          const auto output = roll_controller_.compute(input);
+          const esp_err_t fin_result =
+              output.valid ? fin_.setRollControlTorque(output.torque_nm)
+                           : ESP_ERR_INVALID_STATE;
+          if (fin_result == ESP_OK) {
+            requested_control_torque_nm_.store(output.torque_nm,
+                                               std::memory_order_release);
+            control_applied = true;
+          } else {
+            control_session_.disablePermanently();
+          }
+        }
+      }
+
+      if (!control_applied) {
         requested_control_torque_nm_.store(0.0, std::memory_order_release);
         if (fin_telemetry.zero_reference_valid)
           (void)fin_.zeroHold();
-      } else {
-        const bool airspeed_valid =
-            airspeed_valid_.load(std::memory_order_acquire) &&
-            fresh(airspeed_sample_us_.load(std::memory_order_acquire), now,
-                  flight_config::kAirspeedFreshUs);
-        const double airspeed =
-            airspeed_mps_.load(std::memory_order_acquire);
-        control_session_.observeAirspeed(airspeed_valid, airspeed);
-
-        const bool imu_fresh =
-            imu_sample_valid &&
-            fresh(imu_sample_us_.load(std::memory_order_acquire), now,
-                  flight_config::kImuFreshUs);
-        const bool fin_measurement_fresh =
-            fin_telemetry.encoder_valid && fin_telemetry.rate_valid &&
-            fin_telemetry.zero_reference_valid &&
-            fresh(fin_telemetry.sample_timestamp_us, now,
-                  flight_config::kFinFreshUs);
-        const bool fin_actuator_available =
-            fin_telemetry.state == actuators::FinState::zero_hold ||
-            fin_telemetry.state == actuators::FinState::roll_control;
-
-        const bool lps_fresh =
-            lps_valid_.load(std::memory_order_acquire) &&
-            fresh(lps_sample_us_.load(std::memory_order_acquire), now,
-                  flight_config::kLpsFreshUs);
-        const bool ssc_fresh =
-            ssc_valid_.load(std::memory_order_acquire) &&
-            fresh(ssc_sample_us_.load(std::memory_order_acquire), now,
-                  flight_config::kSscFreshUs);
-        const bool required_inputs_available =
-            control::allControlInputsAvailable(
-                {imu_fresh, fin_measurement_fresh && fin_actuator_available,
-                 lps_fresh, ssc_fresh,
-                 airspeed_valid &&
-                     airspeed > flight_config::kAirspeedPermanentStopMps});
-        const bool fin_entry_ready =
-            fin_measurement_fresh && fin_actuator_available &&
-            fin_telemetry.zero_hold_achieved;
-
-        // +8 sのone-shot gateはそのtickの全必須inputと
-        // ZeroHold成立を要求する。case別に再評価しない。
-        if (!control_session_.gateEvaluated())
-          (void)control_session_.evaluateEligibility(
-              required_inputs_available,
-              fin_telemetry.zero_hold_achieved);
-
-        if (control_session_.referenceStarted()) {
-          (void)control_session_.observeGyro(now, imu_sample_valid,
-                                             roll_rate_rad_s);
-          // entry後の必須input喪失はそのtickでlatchする。
-          // ZeroHoldへのmode移行した翌tickのachievement clearを
-          // 新しいfaultとして使わず、ongoing healthを独立判定する。
-          control_session_.enforcePostEntryHealth(required_inputs_available);
-        }
-
-        bool control_applied = false;
-        if (!control_session_.permanentlyDisabled() &&
-            required_inputs_available && fin_entry_ready) {
-          if (!control_session_.referenceStarted()) {
-            if (control_session_.startReference(now, roll_rate_rad_s))
-              reference_capture_event_sequence_.fetch_add(
-                  1U, std::memory_order_acq_rel);
-          }
-
-          if (control_session_.referenceStarted() &&
-              control_session_.estimatorValid()) {
-            const control::RollControlInput input{
-                control_session_.rollDeviationRad(),
-                fin_telemetry.angle_deg * kDegToRad, roll_rate_rad_s,
-                fin_telemetry.rate_deg_s * kDegToRad, airspeed};
-            const auto output = roll_controller_.compute(input);
-            const auto current_state = state_.snapshot();
-            const bool same_flight =
-                current_state.phase == mission::Phase::flight &&
-                current_state.generation == snapshot.generation &&
-                !current_state.power_cutoff;
-            const esp_err_t fin_result =
-                output.valid && same_flight
-                    ? fin_.setRollControlTorque(output.torque_nm)
-                    : ESP_ERR_INVALID_STATE;
-            if (fin_result == ESP_OK) {
-              requested_control_torque_nm_.store(output.torque_nm,
-                                                 std::memory_order_release);
-              control_applied = true;
-            } else {
-              // invalid controlまたはactuator write faultはaccepted
-              // Controlから即時exitし、同一flightで再entryしない。
-              control_session_.disablePermanently();
-            }
-          }
-        }
-
-        if (!control_applied) {
-          requested_control_torque_nm_.store(0.0, std::memory_order_release);
-          if (fin_telemetry.zero_reference_valid)
-            (void)fin_.zeroHold();
-        }
-        control_active_.store(control_applied, std::memory_order_release);
-        control_permanently_disabled_.store(
-            control_session_.permanentlyDisabled(), std::memory_order_release);
-        control_reference_valid_.store(
-            control_session_.referenceStarted() &&
-                control_session_.estimatorValid(),
-            std::memory_order_release);
-        control_roll_deviation_rad_.store(
-            control_session_.rollDeviationRad(), std::memory_order_release);
       }
+      control_active_.store(control_applied, std::memory_order_release);
+      control_permanently_disabled_.store(
+          control_session_.permanentlyDisabled(), std::memory_order_release);
+      control_reference_valid_.store(
+          control_session_.referenceStarted() &&
+              control_session_.estimatorValid(),
+          std::memory_order_release);
+      control_roll_deviation_rad_.store(
+          control_session_.rollDeviationRad(), std::memory_order_release);
     } else {
       control_active_.store(false, std::memory_order_release);
       requested_control_torque_nm_.store(0.0, std::memory_order_release);
-      if (snapshot.phase == mission::Phase::descent &&
-          fin_telemetry.zero_reference_valid)
-        (void)fin_.zeroHold();
     }
 
     if (snapshot.power_cutoff) {
