@@ -58,7 +58,8 @@ constexpr double kMotorBusVoltageV = 9.0;
 // TB67の実装上のhardware current settingに合わせる。
 constexpr double kMotorMaxCurrentA = 2.2;
 constexpr double kMotorMaximumDuty = 1.0;
-constexpr bool kPositiveTorqueUsesIn1 = true;
+// 実機の動翼回転方向に合わせ、正トルクはIN2側を駆動する。
+constexpr bool kPositiveTorqueUsesIn1 = false;
 constexpr double kFinOutwardCommandLimitDeg = 15.0;
 
 // Control用の個体固定値。runtime calibration/NVSでは変更しない。
