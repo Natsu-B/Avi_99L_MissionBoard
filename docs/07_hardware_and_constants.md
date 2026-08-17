@@ -27,7 +27,7 @@
 - frequency: 8 MHz
 - 1回転内の絶対角を返す
 - multi-turn位置はRAM上でsample間差分をunwrapして保持する
-- encoder軸角を`total gear ratio`で割ってFin出力軸角へ変換する
+- 実機取付ではencoder正方向とFin正方向が逆であるため、`Fin angle = -encoder angle / total gear ratio`として変換する
 
 AS5047Dのmulti-turn周回数はsensor単体からreboot後に復元できないためNVSへ保存しない。
 
@@ -160,9 +160,9 @@ Open負方向を「反時計回り」、Close正方向を「時計回り」と�
 | gearbox continuous speed | 6000 rpm | 超過をtelemetry/limited判定 |
 | motor hard speed | 9800 rpm | 同方向加速torqueを禁止 |
 | PWM max duty | 1.0 | software上限 |
-| positive torque polarity | IN1 | 実機方向確認対象 |
+| positive torque polarity | IN2 | 2026-08-17 実機方向確認 |
 
-`gear ratio = 176.175`はencoder/motor側角度をFin出力軸角へ変換するために使用する。ZeroHold/RollControlへ渡すFin angle/rateはgear ratio変換後の値とする。
+`gear ratio = 176.175`はencoder/motor側角度をFin出力軸角へ変換するために使用する。実機取付極性を含め、ZeroHold/RollControlへ渡す座標は`Fin angle/rate = -encoder angle/rate / gear ratio`とする。正Fin torqueはIN2側を駆動し、この論理Fin座標とmotor polarityを一致させる。
 
 Spicaのfin装着characterizationで直接観測したのはcommandとoutput-equivalent angle/rateである。RollControlのrequested/effective torque、current、drivetrain efficiencyはmapper計算値であり、actual motor currentまたはactual shaft torqueの実測値ではない。runtime command/NVSから値を変更する仕組みは設けない。
 
