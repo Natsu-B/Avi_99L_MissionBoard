@@ -24,6 +24,7 @@ struct Snapshot {
 class StateMachine {
 public:
   [[nodiscard]] bool startSequence();
+  [[nodiscard]] bool cancelSequence();
   [[nodiscard]] bool reportLiftoff(uint64_t detected_us);
   [[nodiscard]] bool liftoffEmergencyRollback();
   [[nodiscard]] bool requestDescent(uint32_t generation);
