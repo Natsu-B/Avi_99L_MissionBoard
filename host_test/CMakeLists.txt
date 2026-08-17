@@ -15,3 +15,12 @@ target_include_directories(minimal_tests PRIVATE ../src)
 target_compile_features(minimal_tests PRIVATE cxx_std_17)
 target_compile_options(minimal_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME minimal_tests COMMAND minimal_tests)
+
+add_executable(cancel_sequence_tests
+  cancel_sequence_tests.cpp
+  ../src/mission/state_machine.cpp
+)
+target_include_directories(cancel_sequence_tests PRIVATE ../src)
+target_compile_features(cancel_sequence_tests PRIVATE cxx_std_17)
+target_compile_options(cancel_sequence_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME cancel_sequence_tests COMMAND cancel_sequence_tests)
