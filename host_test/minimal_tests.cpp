@@ -106,13 +106,14 @@ int main() {
   const double accumulated = unwrapped - 350.0 * kDegToRad;
   assert(std::abs(accumulated - 4.0 * kPi) < 1.0e-12);
 
-  // Encoder軸が何周しても、gear ratioで出力軸Fin角へ変換する。
+  // 実機取付ではencoder正方向とFin正方向が逆向きである。
   const double two_encoder_turns = 4.0 * kPi;
   const double fin_angle = actuators::fin_kinematics::encoderToFinRadians(
       two_encoder_turns, flight_config::kTotalGearRatio);
-  assert(std::abs(fin_angle -
+  assert(std::abs(fin_angle +
                   two_encoder_turns / flight_config::kTotalGearRatio) <
          1.0e-15);
+  static_assert(!flight_config::kPositiveTorqueUsesIn1);
 
   // +8秒gateはICMまたはFin zeroが欠ければそのflightで永久停止する。
   control::FlightControlSession gate_ok{
