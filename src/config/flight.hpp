@@ -24,21 +24,21 @@ constexpr uint32_t kParaPowerStabilizationMs = 100;
 constexpr uint32_t kParaMotionTimeoutMs = 2'000;
 constexpr uint32_t kParaReconnectMs = 1'000;
 
-// FIN0003/FIN0004取得時の30 kHz実機controllerをTorqueMapper座標へ換算する。
-// requested/effective torqueはactual shaft torqueの直接計測値ではない。
-constexpr double kFinZeroHoldKpNmPerRad = 65.390941574;
-constexpr double kFinZeroHoldKiNmPerRadTimesS = 4.577365910;
-constexpr double kFinZeroHoldKdNmPerRadS = 3.269547079;
+// feat/zero-hold-nm-pidで実機成立したcommand-domain PIDをそのまま使う。
+constexpr double kFinZeroHoldKpCommandPerDeg = 500.0;
+constexpr double kFinZeroHoldKiCommandPerDegS = 35.0;
+constexpr double kFinZeroHoldKdCommandPerDegPerS = 25.0;
 constexpr double kFinZeroHoldNmPerCommand = 0.0022825744628906255;
-constexpr double kFinZeroHoldIntegralLimitRadTimesS = 0.034906585;
+constexpr double kFinZeroHoldIntegralLimitDegS = 2.0;
 constexpr double kFinZeroHoldRateFilterTauS = 0.020;
 constexpr double kFinZeroHoldAngleDeadbandDeg = 0.05;
 constexpr double kFinZeroHoldRateDeadbandDegS = 0.5;
 constexpr double kFinZeroHoldMinimumActiveErrorDeg = 0.08;
 constexpr double kFinZeroHoldIntegralDecay = 0.95;
-constexpr double kFinZeroHoldIntegralZeroThresholdRadTimesS =
-    0.001 * 3.14159265358979323846 / 180.0;
-constexpr double kFinControlMaximumDtS = 0.005;
+constexpr double kFinZeroHoldIntegralZeroThresholdDegS = 0.001;
+constexpr double kFinZeroHoldMaximumDtS = 0.005;
+constexpr int16_t kFinZeroHoldControlCommandLimit = 800;
+constexpr int16_t kFinZeroHoldMinimumCommand = 70;
 constexpr double kFinZeroHoldAchievedAngleDeg = 1.0;
 constexpr double kFinZeroHoldAchievedRateDegS = 2.0;
 constexpr uint64_t kFinZeroHoldAchievedDurationUs = 200'000ULL;

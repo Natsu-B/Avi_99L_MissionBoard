@@ -293,17 +293,15 @@ int main() {
                   100.0 * flight_config::kRollGainSchedule.back().gain[0]) <
          1.0e-12);
 
-  // FIN0003/FIN0004取得時のPIDと30 kHz用command scaleを固定する。
-  assert(std::abs(flight_config::kFinZeroHoldKpNmPerRad - 65.390941574) <
-         1.0e-12);
-  assert(std::abs(flight_config::kFinZeroHoldKiNmPerRadTimesS - 4.577365910) <
-         1.0e-12);
-  assert(std::abs(flight_config::kFinZeroHoldKdNmPerRadS - 3.269547079) <
-         1.0e-12);
+  // feat/zero-hold-nm-pidのcommand-domain PID値を固定する。
+  assert(flight_config::kFinZeroHoldKpCommandPerDeg == 500.0);
+  assert(flight_config::kFinZeroHoldKiCommandPerDegS == 35.0);
+  assert(flight_config::kFinZeroHoldKdCommandPerDegPerS == 25.0);
   assert(std::abs(flight_config::kFinZeroHoldNmPerCommand -
                   0.0022825744628906255) < 1.0e-15);
-  assert(std::abs(flight_config::kFinZeroHoldIntegralLimitRadTimesS -
-                  0.034906585) < 1.0e-12);
+  assert(flight_config::kFinZeroHoldIntegralLimitDegS == 2.0);
+  assert(flight_config::kFinZeroHoldControlCommandLimit == 800);
+  assert(flight_config::kFinZeroHoldMinimumCommand == 70);
   assert(std::abs(flight_config::kFinZeroHoldRateFilterTauS - 0.020) <
          1.0e-12);
   static_assert(flight_config::kFinZeroHoldSimulationGatePassed);
@@ -351,103 +349,102 @@ int main() {
   assert(combined_interlock.allows(70));
 
   const control::ZeroHoldConfig zero_hold_config{
-      flight_config::kFinZeroHoldKpNmPerRad,
-      flight_config::kFinZeroHoldKiNmPerRadTimesS,
-      flight_config::kFinZeroHoldKdNmPerRadS,
-      flight_config::kFinZeroHoldIntegralLimitRadTimesS,
+      flight_config::kFinZeroHoldKpCommandPerDeg,
+      flight_config::kFinZeroHoldKiCommandPerDegS,
+      flight_config::kFinZeroHoldKdCommandPerDegPerS,
+      flight_config::kFinZeroHoldIntegralLimitDegS,
       flight_config::kFinZeroHoldRateFilterTauS,
-      flight_config::kFinZeroHoldAngleDeadbandDeg * kDegToRad,
-      flight_config::kFinZeroHoldRateDeadbandDegS * kDegToRad,
-      flight_config::kFinZeroHoldMinimumActiveErrorDeg * kDegToRad,
-      flight_config::kFinControlMaximumDtS,
+      flight_config::kFinZeroHoldAngleDeadbandDeg,
+      flight_config::kFinZeroHoldRateDeadbandDegS,
+      flight_config::kFinZeroHoldMinimumActiveErrorDeg,
+      flight_config::kFinZeroHoldMaximumDtS,
       flight_config::kFinZeroHoldIntegralDecay,
-      flight_config::kFinZeroHoldIntegralZeroThresholdRadTimesS};
+      flight_config::kFinZeroHoldIntegralZeroThresholdDegS,
+      flight_config::kFinZeroHoldControlCommandLimit,
+      flight_config::kFinZeroHoldMinimumCommand,
+      flight_config::kFinOutwardCommandLimitDeg * kDegToRad};
   control::ZeroHoldState zero_hold_state{};
 
   const auto first_zero_hold = control::computeZeroHold(
-      {0.1 * kDegToRad, 2.0 * kDegToRad, 0.001, true}, zero_hold_config,
+      {0.1 * kDegToRad, 2.0 * kDegToRad, 0.001}, zero_hold_config,
       zero_hold_state);
-  const double error = -0.1 * kDegToRad;
+  const double error = -0.1;
   const double first_expected =
-      flight_config::kFinZeroHoldKpNmPerRad * error +
-      flight_config::kFinZeroHoldKiNmPerRadTimesS * error * 0.001;
-  assert(first_zero_hold.valid && first_zero_hold.motion_requested);
-  assert(first_zero_hold.filtered_rate_rad_s == 0.0);
-  assert(std::abs(first_zero_hold.requested_torque_nm - first_expected) <
-         1.0e-12);
+      flight_config::kFinZeroHoldKpCommandPerDeg * error +
+      flight_config::kFinZeroHoldKiCommandPerDegS * error * 0.001;
+  assert(first_zero_hold.valid);
+  assert(first_zero_hold.filtered_rate_deg_s == 0.0);
+  assert(std::abs(first_zero_hold.raw_command - first_expected) < 1.0e-12);
+  assert(first_zero_hold.command == -70);
+  assert(first_zero_hold.minimum_command_applied);
 
   const auto filtered_zero_hold = control::computeZeroHold(
-      {0.1 * kDegToRad, 2.0 * kDegToRad, 0.001, true}, zero_hold_config,
+      {0.1 * kDegToRad, 2.0 * kDegToRad, 0.001}, zero_hold_config,
       zero_hold_state);
-  const double filtered_rate =
-      (0.001 / 0.021) * 2.0 * kDegToRad;
+  const double filtered_rate = (0.001 / 0.021) * 2.0;
   assert(filtered_zero_hold.valid);
-  assert(std::abs(filtered_zero_hold.filtered_rate_rad_s - filtered_rate) <
+  assert(std::abs(filtered_zero_hold.filtered_rate_deg_s - filtered_rate) <
          1.0e-12);
 
-  const double integral_before_freeze =
-      zero_hold_state.integral_error_rad_times_s;
-  const auto frozen_zero_hold = control::computeZeroHold(
-      {1.0 * kDegToRad, 0.0, 0.001, false}, zero_hold_config,
-      zero_hold_state);
-  assert(frozen_zero_hold.valid && frozen_zero_hold.integral_frozen);
-  assert(zero_hold_state.integral_error_rad_times_s == integral_before_freeze);
-
-  const double integral_before_limit_tick =
-      zero_hold_state.integral_error_rad_times_s;
-  const auto limit_tick = control::computeZeroHold(
-      {10.0 * kDegToRad, 5.0 * kDegToRad, 0.001, true}, zero_hold_config,
-      zero_hold_state);
-  assert(limit_tick.valid);
-  const double filtered_rate_after_limit_tick =
-      zero_hold_state.filtered_rate_rad_s;
-  assert(zero_hold_state.integral_error_rad_times_s !=
-         integral_before_limit_tick);
-  control::applyZeroHoldActuatorFeedback(
-      true, integral_before_limit_tick, limit_tick, zero_hold_state);
-  assert(zero_hold_state.integral_error_rad_times_s ==
-         integral_before_limit_tick);
-  assert(zero_hold_state.filtered_rate_rad_s ==
-         filtered_rate_after_limit_tick);
+  control::resetZeroHold(zero_hold_state);
+  const auto saturated_zero_hold = control::computeZeroHold(
+      {5.0 * kDegToRad, 0.0, 0.001}, zero_hold_config, zero_hold_state);
+  assert(saturated_zero_hold.valid && saturated_zero_hold.command_limited);
+  assert(saturated_zero_hold.command == -800);
 
   control::resetZeroHold(zero_hold_state);
-  zero_hold_state.integral_error_rad_times_s = 0.01;
+  zero_hold_state.integral_error_deg_s = 0.01;
   zero_hold_state.rate_filter_initialized = true;
   const auto deadband_zero_hold = control::computeZeroHold(
-      {0.01 * kDegToRad, 0.0, 0.001, true}, zero_hold_config,
+      {0.01 * kDegToRad, 0.0, 0.001}, zero_hold_config,
       zero_hold_state);
   assert(deadband_zero_hold.valid && deadband_zero_hold.in_hold_deadband);
-  assert(deadband_zero_hold.requested_torque_nm == 0.0);
-  assert(std::abs(zero_hold_state.integral_error_rad_times_s - 0.0095) <
+  assert(deadband_zero_hold.command == 0);
+  assert(std::abs(zero_hold_state.integral_error_deg_s - 0.0095) <
          1.0e-12);
 
   const auto invalid_zero_hold = control::computeZeroHold(
-      {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.001, true},
+      {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.001},
       zero_hold_config, zero_hold_state);
   assert(!invalid_zero_hold.valid);
   const auto invalid_dt_zero_hold = control::computeZeroHold(
-      {0.0, 0.0, 0.0, true}, zero_hold_config, zero_hold_state);
+      {0.0, 0.0, 0.0}, zero_hold_config, zero_hold_state);
   assert(!invalid_dt_zero_hold.valid);
 
   control::resetZeroHold(zero_hold_state);
   bool integral_limit_reached = false;
   for (int tick = 0; tick < 100; ++tick) {
     const auto limited_integral = control::computeZeroHold(
-        {1.0, 0.0, 0.001, true}, zero_hold_config, zero_hold_state);
+        {1.0, 0.0, 0.001}, zero_hold_config, zero_hold_state);
     assert(limited_integral.valid);
     integral_limit_reached =
         integral_limit_reached || limited_integral.integral_frozen;
   }
   assert(integral_limit_reached);
-  assert(std::abs(zero_hold_state.integral_error_rad_times_s) <=
-         flight_config::kFinZeroHoldIntegralLimitRadTimesS);
+  assert(std::abs(zero_hold_state.integral_error_deg_s) <=
+         flight_config::kFinZeroHoldIntegralLimitDegS);
 
   control::resetZeroHold(zero_hold_state);
   const auto subthreshold_zero_hold = control::computeZeroHold(
-      {0.079 * kDegToRad, 0.0, 0.001, true}, zero_hold_config,
+      {0.079 * kDegToRad, 0.0, 0.001}, zero_hold_config,
       zero_hold_state);
-  assert(subthreshold_zero_hold.valid &&
-         !subthreshold_zero_hold.motion_requested);
+  assert(subthreshold_zero_hold.valid);
+  assert(!subthreshold_zero_hold.minimum_command_applied);
+  assert(subthreshold_zero_hold.command == -40);
+
+  // +15 degでは内向きcommandを許可し、外向きcommandだけを止める。
+  control::resetZeroHold(zero_hold_state);
+  const auto inward_at_limit = control::computeZeroHold(
+      {15.0 * kDegToRad, 0.0, 0.001}, zero_hold_config, zero_hold_state);
+  assert(inward_at_limit.command == -800 &&
+         !inward_at_limit.outward_inhibited);
+  zero_hold_state.filtered_rate_deg_s = -1'000.0;
+  zero_hold_state.rate_filter_initialized = true;
+  const auto outward_at_limit = control::computeZeroHold(
+      {15.0 * kDegToRad, -1'000.0 * kDegToRad, 0.001}, zero_hold_config,
+      zero_hold_state);
+  assert(outward_at_limit.valid && outward_at_limit.outward_inhibited);
+  assert(outward_at_limit.command == 0);
 
   control::ZeroHoldAchievementState achievement{};
   const control::ZeroHoldAchievementConfig achievement_config{

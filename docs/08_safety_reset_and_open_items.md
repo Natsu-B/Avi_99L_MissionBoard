@@ -106,7 +106,7 @@ reset後はRollControlへ復帰しない。
 - 70 command -> 69 LEDC count、1024 command -> 1023 countの整数floor変換
 - high back-EMFでcurrent制約を実現不能な場合にdriveが0となり、計算値が実測値として扱われないこと
 - gearbox 6000 rpm超過のtelemetryとmotor 9800 rpm同方向加速禁止・逆方向braking許可
-- actual current/torqueを取得できない条件でmechanical restraintをair-load保持からどう識別するか。現実装はintegralを±0.034906585 rad sへ制限し、未根拠のstall timerは置かない
+- actual current/torqueを取得できない条件でmechanical restraintをair-load保持からどう識別するか。現実装はZeroHold integralを±2 deg sへ制限し、未根拠のstall timerは置かない
 - encoder/rate invalid時にmotorがHi-Zへ移ること
 - Roll更新のmapper/LEDC write失敗時に旧PWMを残さずcoastし、同一flightで再entryしないこと
 - Safety cutoff latch後に古いrealtime snapshotが非0 driveを再開できないこと

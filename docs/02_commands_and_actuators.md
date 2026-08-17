@@ -43,7 +43,7 @@
 - encoder: AS5047D
 - motor: 1系統のみ
 - motor driver入力: GPIO39 / GPIO38
-- PWM: 30 kHz
+- PWM: ZeroHold 20 kHz / RollControl 30 kHz
 - total gear ratio: `176.175`
 
 AS5047Dは1回転内の絶対角しか返さない。一方、Finの機構ではgear ratioによりAS5047D側が複数回転するため、単純な`current - zero`のwrap値をFin角として扱ってはならない。
@@ -110,24 +110,22 @@ left/right finの厳密な空力0度を保証するfieldではない。
 
 ```text
 error = -fin_angle
-requested torque = Kp * error + Ki * integral(error) - Kd * filtered_fin_rate
+command = Kp * error + Ki * integral(error) - Kd * filtered_fin_rate
 ```
 
 値:
 
-- `Kp = 65.390941574 N m/rad`
-- `Ki = 4.577365910 N m/(rad s)`
-- `Kd = 3.269547079 N m s/rad`
-- integral limit `±0.034906585 rad s`
+- `Kp = 500 command/deg`
+- `Ki = 35 command/(deg s)`
+- `Kd = 25 command/(deg/s)`
+- integral limit `±2 deg s`
 - velocity LPF `tau = 20 ms`
 - hold deadband `0.05 deg / 0.5 deg/s`
 - minimum active error `0.08 deg`
 
 AS5047Dのencoder軸角・encoder軸角速度は`total gear ratio`で割ってFin出力軸角・角速度へ変換した後でcontrollerへ渡す。
 
-requested torqueは共通actuator mapperへ渡す。mapper後のraw commandが0より大きく70未満でmotionを要求する場合だけ70 commandへ補償し、その後にcurrent制約を再適用する。旧`±600 command`/`0.8 N m`上限は使用せず、30 kHz、10 bitの`±1024`、current、bus voltage、±15 deg outward blockを最終制約とする。FIN0003 MotorDriverと同じ整数floor演算でsoftware commandをLEDC countへ写像し、70 commandは69 count、1024 commandは1023 countとする。
-
-mapperが返すcurrentは最終駆動候補duty、back-EMF、設定抵抗からの計算値であり実測値ではない。bus voltage範囲では`2.2 A`制約を実現できない場合、この計算値を数値上clampせず`current_limit_unrealizable=true`として記録し、実駆動commandを0へ落とす。back-EMF下で70 command補償がrequested torqueと逆向きの計算currentを作る場合は補償前dutyへ戻し、`minimum_command_rejected_torque_direction=true`を記録する。補償前へ戻した後を含む最終dutyでもtorque方向を実現できない場合は`torque_direction_unrealizable=true`としてdriveを0へ落とす。motor speedが`9800 rpm`以上では同方向へさらに加速するrequested torqueだけを禁止し、逆向きbraking torqueは許可する。gearboxの`6000 rpm`超過は独立telemetry/limited conditionとして記録する。
+commandは`±800`へ制限し、minimum active error以上で絶対値70未満なら70 commandへ補償する。20 kHz、10 bitのdrive/coastで直接駆動し、±15 deg境界では外向きcommandだけを0にする。ZeroHoldはRollControl用torque mapperを使用しない。
 
 `zero_hold_achieved`は`|angle| <= 1 deg`かつ`|rate| <= 2 deg/s`が200 ms連続した場合だけ成立する。valid sample gapはFin freshness上限`5 ms`以下でなければならず、timestampが0、非単調または過大gapなら200 ms判定を最初からやり直す。Control gateは`zero_reference_valid`でなくこのfieldを使用する。
 

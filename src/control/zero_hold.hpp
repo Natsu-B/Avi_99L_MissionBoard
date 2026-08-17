@@ -5,39 +5,44 @@
 namespace control {
 
 struct ZeroHoldConfig {
-  double kp_nm_per_rad{};
-  double ki_nm_per_rad_times_s{};
-  double kd_nm_s_per_rad{};
-  double integral_limit_rad_times_s{};
+  double kp_command_per_deg{};
+  double ki_command_per_deg_s{};
+  double kd_command_per_deg_per_s{};
+  double integral_limit_deg_s{};
   double rate_filter_tau_s{};
-  double hold_angle_deadband_rad{};
-  double hold_rate_deadband_rad_s{};
-  double minimum_active_error_rad{};
+  double hold_angle_deadband_deg{};
+  double hold_rate_deadband_deg_s{};
+  double minimum_active_error_deg{};
   double maximum_dt_s{};
   double integral_decay{};
-  double integral_zero_threshold_rad_times_s{};
+  double integral_zero_threshold_deg_s{};
+  int16_t command_limit{};
+  int16_t minimum_command{};
+  double outward_angle_limit_rad{};
 };
 
 struct ZeroHoldInput {
   double angle_rad{};
   double rate_rad_s{};
   double dt_s{};
-  bool integration_allowed{true};
 };
 
 struct ZeroHoldState {
-  double integral_error_rad_times_s{};
-  double filtered_rate_rad_s{};
+  double integral_error_deg_s{};
+  double filtered_rate_deg_s{};
   bool rate_filter_initialized{};
 };
 
 struct ZeroHoldOutput {
-  double requested_torque_nm{};
-  double error_rad{};
-  double filtered_rate_rad_s{};
-  double integral_error_rad_times_s{};
+  double raw_command{};
+  double error_deg{};
+  double filtered_rate_deg_s{};
+  double integral_error_deg_s{};
+  int16_t command{};
   bool in_hold_deadband{};
-  bool motion_requested{};
+  bool command_limited{};
+  bool minimum_command_applied{};
+  bool outward_inhibited{};
   bool integral_frozen{};
   bool valid{};
 };
@@ -57,18 +62,10 @@ struct ZeroHoldAchievementState {
 
 void resetZeroHold(ZeroHoldState &state);
 
-// FIN0003/FIN0004取得時と同じPID/速度LPF順序でrequested torqueを計算する。
-// saturation/current/limitの判定は共通actuator mapperが行い、その結果を次tickの
-// integration_allowedへ戻す。
+// feat/zero-hold-nm-pidと同じPID/速度LPF/command制限順序で計算する。
 [[nodiscard]] ZeroHoldOutput computeZeroHold(const ZeroHoldInput &input,
                                              const ZeroHoldConfig &config,
                                              ZeroHoldState &state);
-
-// actuator limitを同tickで受け、積分増分だけを戻す。速度LPF stateは保持する。
-void applyZeroHoldActuatorFeedback(bool actuator_limited,
-                                   double integral_before_step_rad_times_s,
-                                   const ZeroHoldOutput &output,
-                                   ZeroHoldState &state);
 
 void resetZeroHoldAchievement(ZeroHoldAchievementState &state);
 [[nodiscard]] bool updateZeroHoldAchievement(

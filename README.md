@@ -43,22 +43,22 @@ Fin zeroはNVSへ保存しません。再起動後はencoderの周回数を復�
 
 ## ZeroHold
 
-FIN0003/FIN0004を取得した30 kHz、10 bit、1 kHz実機controllerを、
-Spicaと同じTorqueMapper基準のrequested torque座標へ換算しています。
+`feat/zero-hold-nm-pid`で実機成立した20 kHz、10 bit、1 kHzの
+command-domain controllerをそのまま使用します。
 
-- `Kp = 65.390941574 N m/rad`
-- `Ki = 4.577365910 N m/(rad s)`
-- `Kd = 3.269547079 N m s/rad`
-- integral limit `= ±0.034906585 rad s`
+- `Kp = 500 command/deg`
+- `Ki = 35 command/(deg s)`
+- `Kd = 25 command/(deg/s)`
+- integral limit `= ±2 deg s`
 - velocity LPF `tau = 20 ms`
 - hold deadband `= 0.05 deg / 0.5 deg/s`
 - minimum active error `= 0.08 deg`
 
-ZeroHoldとRollControlは同じactuator mapperを通ります。mapper後にmotionを要求し、raw commandが0より大きく70未満なら、実機で使用した70 commandへ補償します。その後にcurrent制約を再適用し、PWMを`±1024 / ±100 %`へ制限します。commandからLEDC countへの変換はFIN0003と同じ整数floorで、70 commandは69 count、1024 commandは1023 countです。back-EMF下で70 command補償がrequested torqueと逆向きの計算currentを作る場合は補償前dutyへ戻します。旧characterizationの`±600 command`と旧RollControl `1.21208 N m`はsoftware authority limitとして使用しません。±15 degより外向きのrequested torqueは禁止します。bus/back-EMF条件でcurrent制約を実現不能なら計算値をclampして隠さずdriveを0へ落とし、9800 rpm以上では同方向加速torqueを禁止します。gearbox 6000 rpm超過も内部Fin telemetryの独立limited値として保持します。`zero_hold_achieved`とmapperのeffective/current/duty/limitをCAN/SDへ外部出力するprotocol拡張は未実装です。
+ZeroHoldはtorque mapperを通さず、`±800 command`へ制限して70 command未満を補償し、drive/coastで駆動します。±15 deg境界では外向きcommandだけを止めます。CommandReceiveの`FinHold`、LiftoffDetection、Control不成立時、abort、Descentはこの経路です。RollControlだけがmainの30 kHz torque mapper／drive-brake経路を使用します。
 
-`zero_reference_valid`はmotor-side zero capture済み、`zero_hold_achieved`は`|angle| <= 1 deg`かつ`|rate| <= 2 deg/s`が、5 msを超えるsample gapなしで200 ms連続したことを表します。後者がControl gate条件です。どちらも左右physical finの厳密な空力0度を保証しません。invalid/stale sample、mode解除、zero recaptureではPID stateをresetし、current/duty/角度/速度制約中は積分をfreezeします。
+`zero_reference_valid`はmotor-side zero capture済み、`zero_hold_achieved`は`|angle| <= 1 deg`かつ`|rate| <= 2 deg/s`が、5 msを超えるsample gapなしで200 ms連続したことを表します。後者がControl gate条件です。どちらも左右physical finの厳密な空力0度を保証しません。invalid/stale sample、mode解除、zero recaptureではPID stateをresetします。
 
-requested/effective torqueとcurrentはmapper計算座標であり、actual shaft torque/currentの実測値ではありません。
+RollControlのrequested/effective torqueとcurrentはmapper計算座標であり、actual shaft torque/currentの実測値ではありません。
 
 FIN0006/FIN0007 FIT-derived nonlinear plantのZeroHold再検証ではこの
 baselineが50/50 caseで成立したため値を維持します。ただし実測したのは

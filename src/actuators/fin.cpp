@@ -14,6 +14,7 @@ namespace actuators {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kTwoPi = 2.0 * kPi;
 constexpr double kRadToDeg = 180.0 / kPi;
 constexpr double kDegToRad = kPi / 180.0;
 constexpr ledc_mode_t kLedcMode = LEDC_LOW_SPEED_MODE;
@@ -40,22 +41,26 @@ private:
   SemaphoreHandle_t semaphore_{};
 };
 
-static_assert(board::kMotorPwmFrequencyHz == 30'000U);
+static_assert(board::kFinZeroHoldPwmFrequencyHz == 20'000U);
+static_assert(board::kFinRollControlPwmFrequencyHz == 30'000U);
 static_assert(flight_config::kMotorCommandFullScale == 1'024U);
 static_assert(kMaximumDutyCount == 1'023U);
 
 control::ZeroHoldConfig zeroHoldConfig() {
-  return {flight_config::kFinZeroHoldKpNmPerRad,
-          flight_config::kFinZeroHoldKiNmPerRadTimesS,
-          flight_config::kFinZeroHoldKdNmPerRadS,
-          flight_config::kFinZeroHoldIntegralLimitRadTimesS,
+  return {flight_config::kFinZeroHoldKpCommandPerDeg,
+          flight_config::kFinZeroHoldKiCommandPerDegS,
+          flight_config::kFinZeroHoldKdCommandPerDegPerS,
+          flight_config::kFinZeroHoldIntegralLimitDegS,
           flight_config::kFinZeroHoldRateFilterTauS,
-          flight_config::kFinZeroHoldAngleDeadbandDeg * kDegToRad,
-          flight_config::kFinZeroHoldRateDeadbandDegS * kDegToRad,
-          flight_config::kFinZeroHoldMinimumActiveErrorDeg * kDegToRad,
-          flight_config::kFinControlMaximumDtS,
+          flight_config::kFinZeroHoldAngleDeadbandDeg,
+          flight_config::kFinZeroHoldRateDeadbandDegS,
+          flight_config::kFinZeroHoldMinimumActiveErrorDeg,
+          flight_config::kFinZeroHoldMaximumDtS,
           flight_config::kFinZeroHoldIntegralDecay,
-          flight_config::kFinZeroHoldIntegralZeroThresholdRadTimesS};
+          flight_config::kFinZeroHoldIntegralZeroThresholdDegS,
+          flight_config::kFinZeroHoldControlCommandLimit,
+          flight_config::kFinZeroHoldMinimumCommand,
+          flight_config::kFinOutwardCommandLimitDeg * kDegToRad};
 }
 
 FinTorqueMapperConfig torqueMapperConfig() {
@@ -82,7 +87,7 @@ esp_err_t FinActuator::initializeMotor() {
   timer.speed_mode = kLedcMode;
   timer.duty_resolution = kDutyResolution;
   timer.timer_num = kLedcTimer;
-  timer.freq_hz = board::kMotorPwmFrequencyHz;
+  timer.freq_hz = board::kFinZeroHoldPwmFrequencyHz;
   timer.clk_cfg = LEDC_USE_APB_CLK;
   esp_err_t result = ledc_timer_config(&timer);
   if (result != ESP_OK)
@@ -102,8 +107,21 @@ esp_err_t FinActuator::initializeMotor() {
   channel.gpio_num = board::kMotorIn2;
   channel.channel = kIn2Channel;
   result = ledc_channel_config(&channel);
-  if (result == ESP_OK)
+  if (result == ESP_OK) {
     motor_initialized_ = true;
+    motor_pwm_frequency_hz_ = board::kFinZeroHoldPwmFrequencyHz;
+  }
+  return result;
+}
+
+esp_err_t FinActuator::setMotorPwmFrequency(uint32_t frequency_hz) {
+  if (!motor_initialized_.load(std::memory_order_acquire) || frequency_hz == 0)
+    return ESP_ERR_INVALID_STATE;
+  if (motor_pwm_frequency_hz_ == frequency_hz)
+    return ESP_OK;
+  const esp_err_t result = ledc_set_freq(kLedcMode, kLedcTimer, frequency_hz);
+  if (result == ESP_OK)
+    motor_pwm_frequency_hz_ = frequency_hz;
   return result;
 }
 
@@ -222,10 +240,16 @@ esp_err_t FinActuator::zeroHold() {
   if (previous != FinState::zero_hold) {
     resetZeroHoldController();
     clearZeroHoldAchievement();
-    // FIN0003のarmと同様、ZeroHold開始時は一度両入力を0にする。
+    // Roll torqueを先に失効させ、周波数変更失敗時もControl出力を再適用しない。
+    state_.store(FinState::free, std::memory_order_release);
+    // characterization版と同様、ZeroHold開始時は両入力LOWにして20 kHzへ戻す。
     const esp_err_t arming_result = driveCommand(0);
     if (arming_result != ESP_OK)
       return arming_result;
+    const esp_err_t frequency_result =
+        setMotorPwmFrequency(board::kFinZeroHoldPwmFrequencyHz);
+    if (frequency_result != ESP_OK)
+      return frequency_result;
   }
   state_.store(FinState::zero_hold, std::memory_order_release);
   if (!encoder_valid_.load(std::memory_order_acquire) ||
@@ -256,15 +280,24 @@ esp_err_t FinActuator::setRollControlTorque(double torque_nm) {
       !rate_valid_.load(std::memory_order_acquire) || !std::isfinite(torque_nm))
     return ESP_ERR_INVALID_STATE;
 
-  const FinState previous =
-      state_.exchange(FinState::roll_control, std::memory_order_acq_rel);
+  const FinState previous = state_.load(std::memory_order_acquire);
+  if (previous != FinState::roll_control) {
+    const esp_err_t arming_result = driveCommand(0);
+    if (arming_result != ESP_OK)
+      return arming_result;
+    const esp_err_t frequency_result =
+        setMotorPwmFrequency(board::kFinRollControlPwmFrequencyHz);
+    if (frequency_result != ESP_OK)
+      return frequency_result;
+  }
   if (previous == FinState::zero_hold)
     resetZeroHoldController();
+  state_.store(FinState::roll_control, std::memory_order_release);
   requested_roll_torque_nm_ = torque_nm;
   const double angle = angle_rad_.load(std::memory_order_acquire);
   const double rate = rate_rad_s_.load(std::memory_order_acquire);
   const esp_err_t result =
-      applyOutputTorque(torque_nm, angle, rate, torque_nm != 0.0);
+      applyRollControlTorque(torque_nm, angle, rate, torque_nm != 0.0);
   if (result != ESP_OK) {
     requested_roll_torque_nm_ = 0.0;
     state_.store(FinState::free, std::memory_order_release);
@@ -292,7 +325,6 @@ esp_err_t FinActuator::free() {
 
 void FinActuator::resetZeroHoldController() {
   control::resetZeroHold(zero_hold_controller_state_);
-  zero_hold_integration_allowed_ = true;
   last_zero_hold_sample_us_ = 0;
 }
 
@@ -325,32 +357,51 @@ void FinActuator::updateZeroHoldAchievement(uint64_t sample_timestamp_us,
 esp_err_t FinActuator::applyZeroHold(uint64_t sample_timestamp_us,
                                     double angle_rad, double rate_rad_s,
                                     double dt_s) {
-  const double integral_before_step =
-      zero_hold_controller_state_.integral_error_rad_times_s;
   const auto output = control::computeZeroHold(
-      {angle_rad, rate_rad_s, dt_s, zero_hold_integration_allowed_},
-      zeroHoldConfig(), zero_hold_controller_state_);
+      {angle_rad, rate_rad_s, dt_s}, zeroHoldConfig(),
+      zero_hold_controller_state_);
   if (!output.valid) {
     resetZeroHoldController();
     clearZeroHoldAchievement();
     return coast();
   }
 
-  const esp_err_t result = applyOutputTorque(
-      output.requested_torque_nm, angle_rad, rate_rad_s,
-      output.motion_requested);
+  const int16_t hardware_command = flight_config::kPositiveTorqueUsesIn1
+                                       ? output.command
+                                       : -output.command;
+  resetOutputTelemetry();
+  requested_torque_nm_.store(
+      output.raw_command * flight_config::kFinZeroHoldNmPerCommand,
+      std::memory_order_release);
+  effective_torque_nm_.store(
+      static_cast<double>(output.command) *
+          flight_config::kFinZeroHoldNmPerCommand,
+      std::memory_order_release);
+  motor_speed_rpm_.store(rate_rad_s * flight_config::kTotalGearRatio * 60.0 /
+                             kTwoPi,
+                         std::memory_order_release);
+  duty_signed_.store(
+      static_cast<double>(hardware_command) /
+          static_cast<double>(flight_config::kMotorCommandFullScale),
+      std::memory_order_release);
+  command_magnitude_.store(
+      static_cast<uint16_t>(std::abs(static_cast<int>(hardware_command))),
+      std::memory_order_release);
+  actuator_limited_.store(output.command_limited || output.outward_inhibited,
+                          std::memory_order_release);
+  minimum_command_applied_.store(output.minimum_command_applied,
+                                 std::memory_order_release);
+  outward_inhibited_.store(output.outward_inhibited,
+                           std::memory_order_release);
+  coast_required_.store(output.command == 0, std::memory_order_release);
+
+  const esp_err_t result = driveCommand(hardware_command);
   if (result != ESP_OK) {
     resetZeroHoldController();
     clearZeroHoldAchievement();
     (void)coast();
     return result;
   }
-  const bool actuator_limited =
-      actuator_limited_.load(std::memory_order_acquire);
-  control::applyZeroHoldActuatorFeedback(
-      actuator_limited, integral_before_step, output,
-      zero_hold_controller_state_);
-  zero_hold_integration_allowed_ = !actuator_limited;
   last_zero_hold_sample_us_ = sample_timestamp_us;
   updateZeroHoldAchievement(sample_timestamp_us, angle_rad, rate_rad_s);
   return ESP_OK;
@@ -468,8 +519,8 @@ void FinActuator::update(uint64_t now_us) {
     }
     const double rate = rate_rad_s_.load(std::memory_order_acquire);
     const esp_err_t result =
-        applyOutputTorque(requested_roll_torque_nm_, angle, rate,
-                          requested_roll_torque_nm_ != 0.0);
+        applyRollControlTorque(requested_roll_torque_nm_, angle, rate,
+                               requested_roll_torque_nm_ != 0.0);
     if (result != ESP_OK) {
       // LEDC/map fault後に旧PWMを残さない。Runtimeはfree stateを
       // Control actuator faultとしてlatchし、必要ならZeroHoldへ移る。
@@ -529,9 +580,10 @@ bool FinActuator::encoderRecoveryRequested() const {
   return encoder_health_.recoveryRequested();
 }
 
-esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
-                                         double rate_rad_s,
-                                         bool motion_requested) {
+esp_err_t FinActuator::applyRollControlTorque(double torque_nm,
+                                              double angle_rad,
+                                              double rate_rad_s,
+                                              bool motion_requested) {
   if (drive_interlock_.inhibited()) {
     (void)coast();
     return ESP_ERR_INVALID_STATE;
@@ -587,14 +639,10 @@ esp_err_t FinActuator::applyOutputTorque(double torque_nm, double angle_rad,
 
   const int16_t magnitude = static_cast<int16_t>(mapped.command_magnitude);
   const int16_t command = mapped.duty_signed < 0.0 ? -magnitude : magnitude;
-  // FIN0003で使った10 bit commandの整数floor量子化を共通に使う。
-  // ZeroHoldは実機同定と同じdrive/coast、RollはFIN0007と同じ
-  // drive/brakeとする。gain候補はNO_GOであり、この一致は飛行適合を意味しない。
+  // RollControlだけがmainのtorque mapperとdrive/brakeを使用する。
   if (mapped.coast_required)
     return driveCommand(0);
-  if (state_.load(std::memory_order_acquire) == FinState::roll_control)
-    return driveBrakeCommand(command);
-  return driveCommand(command);
+  return driveBrakeCommand(command);
 }
 
 esp_err_t FinActuator::driveCommand(int16_t command) {
@@ -625,7 +673,7 @@ esp_err_t FinActuator::driveCommand(int16_t command) {
       static_cast<uint16_t>(magnitude),
       flight_config::kMotorCommandFullScale, kMaximumDutyCount);
 
-  // mapperがpositive_torque_uses_in1を反映済みのhardware符号を渡す。
+  // 呼出元がmotor polarityを反映済みのhardware符号を渡す。
   const ledc_channel_t active = clamped > 0 ? kIn1Channel : kIn2Channel;
   const ledc_channel_t inactive = clamped > 0 ? kIn2Channel : kIn1Channel;
 
@@ -672,7 +720,7 @@ esp_err_t FinActuator::driveBrakeCommand(int16_t command) {
   return result;
 }
 
-esp_err_t FinActuator::coast() {
+void FinActuator::resetOutputTelemetry() {
   requested_torque_nm_.store(0.0, std::memory_order_release);
   effective_torque_nm_.store(0.0, std::memory_order_release);
   estimated_motor_current_a_.store(0.0, std::memory_order_release);
@@ -693,6 +741,10 @@ esp_err_t FinActuator::coast() {
   motor_speed_inhibited_.store(false, std::memory_order_release);
   gearbox_speed_exceeded_.store(false, std::memory_order_release);
   coast_required_.store(false, std::memory_order_release);
+}
+
+esp_err_t FinActuator::coast() {
+  resetOutputTelemetry();
   if (!motor_initialized_)
     return safe_outputs::motorCoast();
 
