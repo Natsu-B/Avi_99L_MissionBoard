@@ -27,7 +27,7 @@
 - frequency: 8 MHz
 - 1回転内の絶対角を返す
 - multi-turn位置はRAM上でsample間差分をunwrapして保持する
-- encoder軸角を`total gear ratio`で割ってFin出力軸角へ変換する
+- 実機取付ではencoder正方向とFin正方向が逆であるため、`Fin angle = -encoder angle / total gear ratio`として変換する
 
 AS5047Dのmulti-turn周回数はsensor単体からreboot後に復元できないためNVSへ保存しない。
 
@@ -154,9 +154,9 @@ Open負方向を「反時計回り」、Close正方向を「時計回り」と�
 | bus voltage | 9.0 V | fin装着換算条件 |
 | max current | 2.2 A | TB67 hardware setting |
 | PWM max duty | 1.0 | software上限 |
-| positive torque polarity | IN1 | 実機方向確認対象 |
+| positive torque polarity | IN2 | 2026-08-17 実機方向確認 |
 
-`gear ratio = 176.175`はencoder/motor側角度をFin出力軸角へ変換するために使用する。ZeroHold/RollControlへ渡すFin angle/rateはgear ratio変換後の値とする。
+`gear ratio = 176.175`はencoder/motor側角度をFin出力軸角へ変換するために使用する。実機取付極性を含め、ZeroHold/RollControlへ渡す座標は`Fin angle/rate = -encoder angle/rate / gear ratio`とする。正Fin torqueはIN2側を駆動し、この論理Fin座標とmotor polarityを一致させる。
 
 Spicaのfin装着characterizationはcommand-domainの応答を実測しており、上表Kp/Kdおよびrequested torque limitのN m換算には既存TorqueMapperを使用している。actual motor current、actual shaft torque、Vbusはそのcaptureで直接計測していない。このため「±600 commandまで実機で使用した」ことと「±1.369544677734375 N mを実測した」ことは同義ではない。runtime command/NVSから値を変更する仕組みは設けない。
 
